@@ -90,7 +90,17 @@ def f8(s):
                      '.foregroundStyle(auth.hasClientID ? Color.secondary : Color.red)')
 rw('Sources/Views/Views.swift', f8)
 
-# 9) shell 脚本里 "$VAR，" 把全角标点吸进变量名 -> unbound variable
+# 9) build.gradle: buildscript 块不能引用 project.ext 属性（Gradle 8 报 unknown property）
+def f9(s):
+    for a in ['robovm-rt', 'robovm-objc', 'robovm-cocoatouch']:
+        s = s.replace('implementation "com.mobidevelop.robovm:%s:${robovmVersion}"' % a,
+                      'implementation "com.mobidevelop.robovm:%s:2.3.26"' % a)
+    s = s.replace('classpath "com.mobidevelop.robovm:robovm-gradle-plugin:${robovmVersion}"',
+                  'classpath "com.mobidevelop.robovm:robovm-gradle-plugin:2.3.26"')
+    return s
+rw('pipeline/version-build/build.gradle', f9)
+
+# 10) shell 脚本里 "$VAR，" 把全角标点吸进变量名 -> unbound variable
 import glob, re as _re
 for sp in glob.glob('pipeline/**/*.sh', recursive=True):
     src = open(sp, encoding='utf-8').read()
