@@ -1,4 +1,4 @@
-import os
+import os, glob, re as _re
 
 def rw(p, fn):
     s = open(p, encoding='utf-8').read()
@@ -11,8 +11,7 @@ def rw(p, fn):
 def f1(s):
     if 'import SwiftUI' in s:
         return s
-    return s.replace('import Foundation\nimport UIKit\n',
-                     'import Foundation\nimport UIKit\nimport SwiftUI\n', 1)
+    return s.replace('import Foundation\nimport UIKit\n', 'import Foundation\nimport UIKit\nimport SwiftUI\n', 1)
 rw('Sources/Support/Diagnostics.swift', f1)
 
 # 2) Diagnostics 账号行少一个右括号
@@ -65,6 +64,8 @@ rw('Sources/Input/HardwareInput.swift', f5)
 
 # 6) MicrosoftAuth switch 缺分支
 def f6(s):
+    if 'missingClientID' in s:
+        return s
     old = '''            case .cancelled: return "已取消登录"
             }'''
     new = '''            case .cancelled: return "已取消登录"
@@ -76,12 +77,13 @@ rw('Sources/Auth/MicrosoftAuth.swift', f6)
 
 # 7) Preflight read 多套了一层可选
 def f7(s):
+    if '!chunk.isEmpty' in s:
+        return s
     old = 'guard let chunk = try? fh.read(upToCount: 1 << 20), let c = chunk, !c.isEmpty else { break }'
     new = 'guard let chunk = try? fh.read(upToCount: 1 << 20), !chunk.isEmpty else { break }'
     s = s.replace(old, new)
-    s = s.replace('            var buf = carry\n            buf.append(c)',
-                  '            var buf = carry\n            buf.append(chunk)')
-    return s
+    return s.replace('            var buf = carry\n            buf.append(c)',
+                     '            var buf = carry\n            buf.append(chunk)')
 rw('Sources/Runtime/Preflight.swift', f7)
 
 # 8) Views 三元里 secondary/red 类型不一致
@@ -90,18 +92,18 @@ def f8(s):
                      '.foregroundStyle(auth.hasClientID ? Color.secondary : Color.red)')
 rw('Sources/Views/Views.swift', f8)
 
-# 9) build.gradle: buildscript 块不能引用 project.ext 属性（Gradle 8 报 unknown property）
-def f9(s):
+# 9) buildscript 块不能引用 project.ext 属性（Gradle 8）
+GP = 'pipeline/version-build/build.gradle'
+def _gr(s):
     for a in ['robovm-rt', 'robovm-objc', 'robovm-cocoatouch']:
         s = s.replace('implementation "com.mobidevelop.robovm:%s:${robovmVersion}"' % a,
                       'implementation "com.mobidevelop.robovm:%s:2.3.26"' % a)
-    s = s.replace('classpath "com.mobidevelop.robovm:robovm-gradle-plugin:${robovmVersion}"',
-                  'classpath "com.mobidevelop.robovm:robovm-gradle-plugin:2.3.26"')
-    return s
-rw('pipeline/version-build/build.gradle', f9)
+    return s.replace('classpath "com.mobidevelop.robovm:robovm-gradle-plugin:${robovmVersion}"',
+                     'classpath "com.mobidevelop.robovm:robovm-gradle-plugin:2.3.26"')
+rw(GP, _gr)
 
-# 10) build.gradle 缺项目级 repositories（Gradle 8 不继承 buildscript 的仓库）
-def f10(s):
+# 10) 补项目级 repositories（Gradle 8 不继承 buildscript 的仓库）
+def _grr(s):
     if s.count('repositories {') >= 2:
         return s
     old = "apply plugin: 'robovm'\n\ndependencies {"
@@ -112,66 +114,37 @@ def f10(s):
     if idx < 0:
         return s
     return s[:idx] + "repositories {\n    mavenCentral()\n}\n\n" + s[idx:]
-rw('pipeline/version-build/build.gradle', f10)
+rw(GP, _grr)
 
-# 11) robovm.xml 精简到 RoboVM 2.3.26 Config 认识的元素
-MIN_ROBOVM = '''<?xml version="1.0" encoding="UTF-8"?>
-<config>
-    <target>xcframework</target>
-    <executableName>GameRuntime</executableName>
-    <mainClass>com.mobilite.game.MobiLiteGame</mainClass>
-
-    <forceLinkClasses>
-        <pattern>com.mobilite.game.**</pattern>
-        <pattern>net.minecraft.**</pattern>
-        <pattern>com.mojang.**</pattern>
-    </forceLinkClasses>
-
-    <frameworks>
-        <framework>Foundation</framework>
-        <framework>UIKit</framework>
-        <framework>OpenGLES</framework>
-        <framework>QuartzCore</framework>
-        <framework>CoreGraphics</framework>
-        <framework>GameController</framework>
-    </frameworks>
-</config>
-'''
-
-
-def f11(s):
-    return MIN_ROBOVM
-
-
-rw('pipeline/version-build/robovm.xml', f11)
-
-# 12) FrameworkTarget.init() 要求 Info.plist；给 version-build 工程放一份
-INFO_PLIST = '''<?xml version="1.0" encoding="UTF-8"?>
+# 11) Info.plist：v18 已自带正确版本，只在缺失时才补
+IP = 'pipeline/version-build/Info.plist'
+if not os.path.exists(IP):
+    open(IP, 'w', encoding='utf-8').write('''<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleDevelopmentRegion</key><string>en</string>
     <key>CFBundleExecutable</key><string>GameRuntime</string>
     <key>CFBundleIdentifier</key><string>com.mobilite.gameruntime</string>
-    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleName</key><string>GameRuntime</string>
     <key>CFBundlePackageType</key><string>FMWK</string>
-    <key>CFBundleShortVersionString</key><string>1.0</string>
-    <key>CFBundleVersion</key><string>1</string>
     <key>MinimumOSVersion</key><string>16.0</string>
 </dict>
 </plist>
-'''
-open('pipeline/version-build/Info.plist', 'w', encoding='utf-8').write(INFO_PLIST)
-print("wrote pipeline/version-build/Info.plist")
+''')
+    print("wrote", IP)
+else:
+    print("keep existing", IP)
 
-# 13) shell 脚本里 "$VAR，" 把全角标点吸进变量名 -> unbound variable
-import glob, re as _re
+# 12) robovm.xml 不动（v18 已含 <infoPList>）；只检查关键元素存在
+x = open('pipeline/version-build/robovm.xml', encoding='utf-8').read()
+print('robovm.xml infoPList:', '<infoPList>' in x, '| headers:', '<headers>' in x)
+
+# 13) shell 里 "$VAR，" 把全角标点吸进变量名
 for sp in glob.glob('pipeline/**/*.sh', recursive=True):
     src = open(sp, encoding='utf-8').read()
-    fixed = _re.sub(r'\$([A-Za-z_][A-Za-z0-9_]*)(?=[^\x00-\x7f])', r'${\1}', src)
+    fixed = _re.sub(r'\$([A-Za-z_][A-Za-z0-9_]*)(?=[^\x00-\x7f])', r'${1}', src)
     if fixed != src:
         open(sp, 'w', encoding='utf-8').write(fixed)
         print("sh-cjk fix:", sp)
 
-print("v17 patch done")
+print("patch done (v18)")

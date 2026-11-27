@@ -1,4 +1,4 @@
-name: Build MobiLite IPA v17
+name: Build MobiLite IPA v18
 
 on:
   push:
@@ -6,6 +6,7 @@ on:
     paths-ignore:
       - 'artifacts/**'
       - '_ci_logs/**'
+      - '*.md'
 
 permissions:
   contents: write
@@ -14,15 +15,15 @@ env:
   MC_VER: "1.21.4"
   AOT_SCOPE: "narrow"
   CLASS_VER: "52"
-  BIN: "mobilite-v17"
-  SRC_ZIP: "https://filebin.net/mobilite-v17/MobiLite-v17-src.zip"
-  SRC_ZIP_ALT: "https://aka.doubaocdn.com/s/JRw8VIs5j5"
+  BIN: "mobilite-v18"
+  SRC_ZIP: "https://aka.doubaocdn.com/s/oVMkvRdfUQ"
+  SRC_ZIP_ALT: "https://aka.doubaocdn.com/s/oVMkvRdfUQ"
 
 jobs:
   build:
     runs-on: macos-15
-    timeout-minutes: 240
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
       - name: Build
-        run: bash .ci/run.sh || bash .ci/fallback.sh
+        run: bash .ci/run.sh
