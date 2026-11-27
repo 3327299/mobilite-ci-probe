@@ -25,5 +25,12 @@ jobs:
     timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
+
+      - name: 固定 Xcode / 工具链路径
+        run: |
+          echo "xcode-select: $(xcode-select -p)"
+          echo "DEVELOPER_DIR=$(xcode-select -p)" >> "$GITHUB_ENV"
+          ls "$(xcode-select -p)/Platforms/iPhoneOS.platform/Developer/SDKs" | head -5
+
       - name: Build
         run: bash .ci/run.sh
