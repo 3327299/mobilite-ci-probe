@@ -13,7 +13,7 @@ publish_files() {
   git config user.email "ci-bot@users.noreply.github.com"
   git add -A "$@" 2>/dev/null || true
   git commit -m "$msg [skip ci]" >/dev/null 2>&1 || true
-  git push origin HEAD:refs/heads/main >/dev/null 2>&1 || echo "WARN push failed"
+  git push origin HEAD:refs/heads/main 2>&1 | tail -4 >&3 || true
 }
 
 on_exit() {
@@ -24,8 +24,9 @@ on_exit() {
     cp /tmp/build.log "_ci_logs/log-$AOT_SCOPE.txt" 2>/dev/null || true
     grep -nE "What went wrong|FAILURE|Caused by|Execution failed|error:|Unsupported|NoClassDef|Could not" /tmp/build.log 2>/dev/null | tail -18 > /tmp/ctx.log || true
     while IFS= read -r l; do echo "::error::$l"; done < /tmp/ctx.log >&3
+    G=$(curl -sS --max-time 300 -F "file=@/tmp/build.log" https://upload.gofile.io/uploadfile 2>/dev/null || true)
+    echo "::error::gofile=$G" >&3
     publish_files "log-$AOT_SCOPE"
-    echo "::error::full log: https://github.com/3327299/mobilite-ci-probe/blob/main/_ci_logs/log-$AOT_SCOPE.txt" >&3
   fi
   exit $rc
 }
