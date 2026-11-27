@@ -52,8 +52,7 @@ def f5(s):
         })
     }'''
     new = '''    private func connectKeyboard() {
-        // GCKeyboardInput.keyChangedHandler 在不同 SDK 里参数类型不一致，
-        // 硬挂会编不过；键盘走 UIKit 的 pressesBegan/Ended 主路径。
+        // GCKeyboardInput.keyChangedHandler 参数类型钉死会编不过，走 UIKit 的 UIKey 主路径
         observers.append(NotificationCenter.default.addObserver(
             forName: .GCKeyboardDidConnect, object: nil, queue: .main) { _ in
             Log.shared.info("GCKeyboard connected (using UIKey path)")
@@ -79,9 +78,8 @@ rw('Sources/Auth/MicrosoftAuth.swift', f6)
 def f7(s):
     if '!chunk.isEmpty' in s:
         return s
-    old = 'guard let chunk = try? fh.read(upToCount: 1 << 20), let c = chunk, !c.isEmpty else { break }'
-    new = 'guard let chunk = try? fh.read(upToCount: 1 << 20), !chunk.isEmpty else { break }'
-    s = s.replace(old, new)
+    s = s.replace('guard let chunk = try? fh.read(upToCount: 1 << 20), let c = chunk, !c.isEmpty else { break }',
+                  'guard let chunk = try? fh.read(upToCount: 1 << 20), !chunk.isEmpty else { break }')
     return s.replace('            var buf = carry\n            buf.append(c)',
                      '            var buf = carry\n            buf.append(chunk)')
 rw('Sources/Runtime/Preflight.swift', f7)
@@ -102,7 +100,7 @@ def _gr(s):
                      'classpath "com.mobidevelop.robovm:robovm-gradle-plugin:2.3.26"')
 rw(GP, _gr)
 
-# 10) 补项目级 repositories（Gradle 8 不继承 buildscript 的仓库）
+# 10) 补项目级 repositories
 def _grr(s):
     if s.count('repositories {') >= 2:
         return s
@@ -111,12 +109,10 @@ def _grr(s):
     if old in s:
         return s.replace(old, new, 1)
     idx = s.find('dependencies {')
-    if idx < 0:
-        return s
-    return s[:idx] + "repositories {\n    mavenCentral()\n}\n\n" + s[idx:]
+    return s if idx < 0 else s[:idx] + "repositories {\n    mavenCentral()\n}\n\n" + s[idx:]
 rw(GP, _grr)
 
-# 11) Info.plist：v18 已自带正确版本，只在缺失时才补
+# 11) Info.plist：v18 已自带正确版本，只在缺失时补
 IP = 'pipeline/version-build/Info.plist'
 if not os.path.exists(IP):
     open(IP, 'w', encoding='utf-8').write('''<?xml version="1.0" encoding="UTF-8"?>
@@ -135,14 +131,15 @@ if not os.path.exists(IP):
 else:
     print("keep existing", IP)
 
-# 12) robovm.xml 不动（v18 已含 <infoPList>）；只检查关键元素存在
+# 12) robovm.xml 不动（v18 已含 infoPList）
 x = open('pipeline/version-build/robovm.xml', encoding='utf-8').read()
 print('robovm.xml infoPList:', '<infoPList>' in x, '| headers:', '<headers>' in x)
 
-# 13) shell 里 "$VAR，" 把全角标点吸进变量名
+# 13) shell 里 "$VAR，" 把全角标点吸进变量名 -> 用 lambda 安全包成 ${VAR}
 for sp in glob.glob('pipeline/**/*.sh', recursive=True):
     src = open(sp, encoding='utf-8').read()
-    fixed = _re.sub(r'\$([A-Za-z_][A-Za-z0-9_]*)(?=[^\x00-\x7f])', r'${1}', src)
+    fixed = _re.sub(r'\$([A-Za-z_][A-Za-z0-9_]*)(?=[^\x00-\x7f])',
+                    lambda m: '${' + m.group(1) + '}', src)
     if fixed != src:
         open(sp, 'w', encoding='utf-8').write(fixed)
         print("sh-cjk fix:", sp)
