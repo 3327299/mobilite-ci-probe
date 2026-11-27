@@ -1,0 +1,112 @@
+name: build
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch and patch source
+        run: |
+          set -e
+          curl -fL --retry 3 -o /tmp/src.zip "https://aka.doubaocdn.com/s/38PGmxMuSu"
+          rm -rf /tmp/src /tmp/work && mkdir -p /tmp/src
+          unzip -q /tmp/src.zip -d /tmp/src
+          cp -R /tmp/src/MobiLite /tmp/work
+          cd /tmp/work
+          python3 - <<'PY'
+          p='Sources/Versions/VersionStorage.swift'
+          s=open(p,encoding='utf-8').read()
+          s=s.replace('setKey("renderDistance", String(max(2, min(32, renderDistance)))','setKey("renderDistance", String(max(2, min(32, renderDistance))))')
+          open(p,'w',encoding='utf-8').write(s)
+          p='Sources/Runtime/AOTRuntime.swift'
+          s=open(p,encoding='utf-8').read()
+          s=s.replace('if let data = JSONEncoder.pretty.encode(masked) {','if let data = try? JSONEncoder.pretty.encode(masked) {')
+          open(p,'w',encoding='utf-8').write(s)
+          p='probes/MobiProbe/project.yml'
+          s=open(p,encoding='utf-8').read()
+          if 'ENABLE_DEBUG_DYLIB' not in s:
+              s=s.replace('        PRODUCT_BUNDLE_IDENTIFIER: com.mobilite.probe\n','        PRODUCT_BUNDLE_IDENTIFIER: com.mobilite.probe\n        PRODUCT_NAME: MobiProbe\n        ENABLE_DEBUG_DYLIB: NO\n        ENABLE_PREVIEWS: NO\n',1)
+          open(p,'w',encoding='utf-8').write(s)
+          PY
+          if [ -f probes/MobiProbe/Sources/main.swift ]; then mv probes/MobiProbe/Sources/main.swift probes/MobiProbe/Sources/ProbeMain.swift; fi
+          echo "files=$(find . -type f | wc -l | tr -d ' ')"
+      - name: Install xcodegen
+        run: |
+          set -e
+          curl -fL --retry 3 --connect-timeout 20 -o /tmp/xg.zip https://github.com/yonaskolb/XcodeGen/releases/latest/download/xcodegen.zip
+          rm -rf /tmp/xg && mkdir -p /tmp/xg
+          unzip -q /tmp/xg.zip -d /tmp/xg
+          echo /tmp/xg/xcodegen/bin >> $GITHUB_PATH
+          /tmp/xg/xcodegen/bin/xcodegen --version
+      - name: Build launcher
+        run: |
+          set -o pipefail
+          cd /tmp/work
+          xcodegen generate
+          xcodebuild -project MobiLite.xcodeproj -scheme MobiLite -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath ./DD CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build > /tmp/shell.log 2>&1 || { echo "::error::xcodebuild failed"; tail -n 80 /tmp/shell.log; exit 1; }
+          APP="DD/Build/Products/Release-iphoneos/MobiLite.app"
+          test -f "$APP/MobiLite" || { echo "::error::main binary missing"; ls -la "$APP"; exit 1; }
+          file "$APP/MobiLite"
+          echo "app_size=$(du -sh "$APP" | cut -f1)"
+          ls -la "$APP"
+      - name: Package launcher IPA
+        run: |
+          set -e
+          cd /tmp/work
+          APP="DD/Build/Products/Release-iphoneos/MobiLite.app"
+          rm -rf pkg && mkdir -p pkg/Payload
+          cp -R "$APP" pkg/Payload/
+          ( cd pkg && zip -qry /tmp/MobiLite-v14-unsigned.ipa Payload )
+          ls -l /tmp/MobiLite-v14-unsigned.ipa
+      - name: Build probe
+        run: |
+          set -o pipefail
+          cd /tmp/work/probes/MobiProbe
+          chmod +x build.sh
+          SKIP_AOT=1 bash build.sh > /tmp/probe.log 2>&1 || { echo "::error::probe build failed"; tail -n 80 /tmp/probe.log; exit 1; }
+          APP="build/Build/Products/Debug-iphoneos/MobiProbe.app"
+          test -f "$APP/MobiProbe" || { echo "::error::probe main missing"; ls -la "$APP"; exit 1; }
+          file "$APP/MobiProbe"
+          rm -rf /tmp/pkgp && mkdir -p /tmp/pkgp/Payload && cp -R "$APP" /tmp/pkgp/Payload/
+          ( cd /tmp/pkgp && zip -qry /tmp/MobiProbe-v14-unsigned.ipa Payload )
+          ls -l /tmp/MobiProbe-v14-unsigned.ipa
+      - name: Manifest
+        run: |
+          set -e
+          APP="DD/Build/Products/Release-iphoneos/MobiLite.app"
+          cd /tmp/work
+          {
+            echo "shell_ipa=MobiLite-v14-unsigned.ipa size=$(stat -f%z /tmp/MobiLite-v14-unsigned.ipa) sha256=$(shasum -a 256 /tmp/MobiLite-v14-unsigned.ipa | awk '{print $1}')"
+            echo "probe_ipa=MobiProbe-v14-unsigned.ipa size=$(stat -f%z /tmp/MobiProbe-v14-unsigned.ipa) sha256=$(shasum -a 256 /tmp/MobiProbe-v14-unsigned.ipa | awk '{print $1}')"
+            echo "shell_main=$(stat -f%z "$APP/MobiLite")"
+            echo "shell_app_bytes=$(du -sk "$APP" | awk '{print $1*1024}')"
+            echo "shell_bundle=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist")"
+            echo "shell_minios=$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$APP/Info.plist" 2>/dev/null || echo unknown)"
+            echo "assets_car=$(stat -f%z "$APP/Assets.car" 2>/dev/null || echo 0)"
+            echo "files=$(find "$APP" -type f | wc -l | tr -d ' ')"
+            echo "--- file list ---"
+            find "$APP" -type f -exec ls -l {} \; | awk '{print $5, $9}'
+            echo "built_at=$(date -u +%FT%TZ)"
+            echo "xcode=$(xcodebuild -version | tr '\n' ' ')"
+          } > /tmp/manifest.txt
+          cat /tmp/manifest.txt
+      - name: Upload
+        if: always()
+        run: |
+          set -e
+          BIN="mobilite-v14"
+          cd /tmp
+          for F in /tmp/MobiLite-v14-unsigned.ipa /tmp/MobiProbe-v14-unsigned.ipa /tmp/manifest.txt; do
+            [ -f "$F" ] || continue
+            curl -sS --max-time 300 -X POST -H "filename: $(basename $F)" --data-binary "@$F" "https://filebin.net/$BIN/$(basename $F)" > /dev/null || echo "upload failed $F"
+          done
+          tail -n 120 /tmp/shell.log 2>/dev/null > /tmp/log-shell.txt || true
+          tail -n 120 /tmp/probe.log 2>/dev/null > /tmp/log-probe.txt || true
+          for F in /tmp/log-shell.txt /tmp/log-probe.txt; do
+            [ -s "$F" ] || continue
+            curl -sS --max-time 120 -X POST -H "filename: $(basename $F)" --data-binary "@$F" "https://filebin.net/$BIN/$(basename $F)" > /dev/null || true
+          done
+          echo done
