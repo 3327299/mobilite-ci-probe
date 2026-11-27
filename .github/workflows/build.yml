@@ -12,26 +12,12 @@ jobs:
         run: |
           set -e
           curl -fL --retry 3 -o /tmp/src.zip "https://aka.doubaocdn.com/s/38PGmxMuSu"
+          curl -fL --retry 3 -o /tmp/patch.py "https://filebin.net/mobilite-v14/patch.py"
           rm -rf /tmp/src /tmp/work && mkdir -p /tmp/src
           unzip -q /tmp/src.zip -d /tmp/src
           cp -R /tmp/src/MobiLite /tmp/work
           cd /tmp/work
-          python3 - <<'PY'
-          p='Sources/Versions/VersionStorage.swift'
-          s=open(p,encoding='utf-8').read()
-          s=s.replace('setKey("renderDistance", String(max(2, min(32, renderDistance)))','setKey("renderDistance", String(max(2, min(32, renderDistance))))')
-          open(p,'w',encoding='utf-8').write(s)
-          p='Sources/Runtime/AOTRuntime.swift'
-          s=open(p,encoding='utf-8').read()
-          s=s.replace('if let data = JSONEncoder.pretty.encode(masked) {','if let data = try? JSONEncoder.pretty.encode(masked) {')
-          open(p,'w',encoding='utf-8').write(s)
-          p='probes/MobiProbe/project.yml'
-          s=open(p,encoding='utf-8').read()
-          if 'ENABLE_DEBUG_DYLIB' not in s:
-              s=s.replace('        PRODUCT_BUNDLE_IDENTIFIER: com.mobilite.probe\n','        PRODUCT_BUNDLE_IDENTIFIER: com.mobilite.probe\n        PRODUCT_NAME: MobiProbe\n        ENABLE_DEBUG_DYLIB: NO\n        ENABLE_PREVIEWS: NO\n',1)
-          open(p,'w',encoding='utf-8').write(s)
-          PY
-          if [ -f probes/MobiProbe/Sources/main.swift ]; then mv probes/MobiProbe/Sources/main.swift probes/MobiProbe/Sources/ProbeMain.swift; fi
+          python3 /tmp/patch.py
           echo "files=$(find . -type f | wc -l | tr -d ' ')"
       - name: Install xcodegen
         run: |
@@ -46,7 +32,7 @@ jobs:
           set -o pipefail
           cd /tmp/work
           xcodegen generate
-          xcodebuild -project MobiLite.xcodeproj -scheme MobiLite -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath ./DD CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build > /tmp/shell.log 2>&1 || { echo "::error::xcodebuild failed"; tail -n 80 /tmp/shell.log; exit 1; }
+          xcodebuild -project MobiLite.xcodeproj -scheme MobiLite -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath ./DD CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build > /tmp/shell.log 2>&1 || { echo "::error::xcodebuild failed"; grep -n 'error:' /tmp/shell.log | head -40; exit 1; }
           APP="DD/Build/Products/Release-iphoneos/MobiLite.app"
           test -f "$APP/MobiLite" || { echo "::error::main binary missing"; ls -la "$APP"; exit 1; }
           file "$APP/MobiLite"
@@ -66,7 +52,7 @@ jobs:
           set -o pipefail
           cd /tmp/work/probes/MobiProbe
           chmod +x build.sh
-          SKIP_AOT=1 bash build.sh > /tmp/probe.log 2>&1 || { echo "::error::probe build failed"; tail -n 80 /tmp/probe.log; exit 1; }
+          SKIP_AOT=1 bash build.sh > /tmp/probe.log 2>&1 || { echo "::error::probe build failed"; grep -n 'error:' /tmp/probe.log | head -20; exit 1; }
           APP="build/Build/Products/Debug-iphoneos/MobiProbe.app"
           test -f "$APP/MobiProbe" || { echo "::error::probe main missing"; ls -la "$APP"; exit 1; }
           file "$APP/MobiProbe"
@@ -76,8 +62,8 @@ jobs:
       - name: Manifest
         run: |
           set -e
-          APP="DD/Build/Products/Release-iphoneos/MobiLite.app"
           cd /tmp/work
+          APP="DD/Build/Products/Release-iphoneos/MobiLite.app"
           {
             echo "shell_ipa=MobiLite-v14-unsigned.ipa size=$(stat -f%z /tmp/MobiLite-v14-unsigned.ipa) sha256=$(shasum -a 256 /tmp/MobiLite-v14-unsigned.ipa | awk '{print $1}')"
             echo "probe_ipa=MobiProbe-v14-unsigned.ipa size=$(stat -f%z /tmp/MobiProbe-v14-unsigned.ipa) sha256=$(shasum -a 256 /tmp/MobiProbe-v14-unsigned.ipa | awk '{print $1}')"
@@ -88,9 +74,9 @@ jobs:
             echo "assets_car=$(stat -f%z "$APP/Assets.car" 2>/dev/null || echo 0)"
             echo "files=$(find "$APP" -type f | wc -l | tr -d ' ')"
             echo "--- file list ---"
-            find "$APP" -type f -exec ls -l {} \; | awk '{print $5, $9}'
+            find "$APP" -type f -exec ls -l {} \\; | awk '{print $5, $9}'
             echo "built_at=$(date -u +%FT%TZ)"
-            echo "xcode=$(xcodebuild -version | tr '\n' ' ')"
+            echo "xcode=$(xcodebuild -version | tr '\\n' ' ')"
           } > /tmp/manifest.txt
           cat /tmp/manifest.txt
       - name: Upload
@@ -98,15 +84,10 @@ jobs:
         run: |
           set -e
           BIN="mobilite-v14"
-          cd /tmp
           for F in /tmp/MobiLite-v14-unsigned.ipa /tmp/MobiProbe-v14-unsigned.ipa /tmp/manifest.txt; do
             [ -f "$F" ] || continue
             curl -sS --max-time 300 -X POST -H "filename: $(basename $F)" --data-binary "@$F" "https://filebin.net/$BIN/$(basename $F)" > /dev/null || echo "upload failed $F"
           done
-          tail -n 120 /tmp/shell.log 2>/dev/null > /tmp/log-shell.txt || true
-          tail -n 120 /tmp/probe.log 2>/dev/null > /tmp/log-probe.txt || true
-          for F in /tmp/log-shell.txt /tmp/log-probe.txt; do
-            [ -s "$F" ] || continue
-            curl -sS --max-time 120 -X POST -H "filename: $(basename $F)" --data-binary "@$F" "https://filebin.net/$BIN/$(basename $F)" > /dev/null || true
-          done
+          [ -s /tmp/shell.log ] && curl -sS --max-time 300 -X POST -H "filename: log-shell.txt" --data-binary @/tmp/shell.log "https://filebin.net/$BIN/log-shell.txt" > /dev/null || true
+          [ -s /tmp/probe.log ] && curl -sS --max-time 300 -X POST -H "filename: log-probe.txt" --data-binary @/tmp/probe.log "https://filebin.net/$BIN/log-probe.txt" > /dev/null || true
           echo done
