@@ -114,7 +114,7 @@ def f10(s):
     return s[:idx] + "repositories {\n    mavenCentral()\n}\n\n" + s[idx:]
 rw('pipeline/version-build/build.gradle', f10)
 
-# 11) robovm.xml 精简到 RoboVM 2.3.26 Config 认识的元素（headers/modulemap 会被 simple-xml 拒绝）
+# 11) robovm.xml 精简到 RoboVM 2.3.26 Config 认识的元素
 MIN_ROBOVM = '''<?xml version="1.0" encoding="UTF-8"?>
 <config>
     <target>xcframework</target>
@@ -145,7 +145,27 @@ def f11(s):
 
 rw('pipeline/version-build/robovm.xml', f11)
 
-# 12) shell 脚本里 "$VAR，" 把全角标点吸进变量名 -> unbound variable
+# 12) FrameworkTarget.init() 要求 Info.plist；给 version-build 工程放一份
+INFO_PLIST = '''<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key><string>en</string>
+    <key>CFBundleExecutable</key><string>GameRuntime</string>
+    <key>CFBundleIdentifier</key><string>com.mobilite.gameruntime</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>CFBundleName</key><string>GameRuntime</string>
+    <key>CFBundlePackageType</key><string>FMWK</string>
+    <key>CFBundleShortVersionString</key><string>1.0</string>
+    <key>CFBundleVersion</key><string>1</string>
+    <key>MinimumOSVersion</key><string>16.0</string>
+</dict>
+</plist>
+'''
+open('pipeline/version-build/Info.plist', 'w', encoding='utf-8').write(INFO_PLIST)
+print("wrote pipeline/version-build/Info.plist")
+
+# 13) shell 脚本里 "$VAR，" 把全角标点吸进变量名 -> unbound variable
 import glob, re as _re
 for sp in glob.glob('pipeline/**/*.sh', recursive=True):
     src = open(sp, encoding='utf-8').read()
