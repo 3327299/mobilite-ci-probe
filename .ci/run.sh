@@ -7,16 +7,25 @@ exec 3>&1 4>&2
 : > /tmp/build.log
 exec > >(tee -a /tmp/build.log) 2>&1
 
+publish_files() {
+  msg="$1"; shift
+  git config user.name "ci-bot"
+  git config user.email "ci-bot@users.noreply.github.com"
+  git add -A "$@" 2>/dev/null || true
+  git commit -m "$msg [skip ci]" >/dev/null 2>&1 || true
+  git push origin HEAD:refs/heads/main >/dev/null 2>&1 || echo "WARN push failed"
+}
+
 on_exit() {
   rc=$?
   if [ "$rc" != "0" ]; then
     sleep 2
-    tail -n 30 /tmp/build.log > /tmp/ctx.log 2>/dev/null || true
+    mkdir -p _ci_logs
+    cp /tmp/build.log "_ci_logs/log-$AOT_SCOPE.txt" 2>/dev/null || true
+    grep -nE "What went wrong|FAILURE|Caused by|Execution failed|error:|Unsupported|NoClassDef|Could not" /tmp/build.log 2>/dev/null | tail -18 > /tmp/ctx.log || true
     while IFS= read -r l; do echo "::error::$l"; done < /tmp/ctx.log >&3
-    tail -n 500 /tmp/build.log > /tmp/tail.log 2>/dev/null || true
-    curl -sS --max-time 300 -X POST -H "filename: log-$AOT_SCOPE.txt" --data-binary @/tmp/tail.log \
-      "https://filebin.net/$BIN/log-$AOT_SCOPE.txt" >/dev/null 2>&1 || true
-    echo "::error::full log: https://filebin.net/$BIN/log-$AOT_SCOPE.txt" >&3
+    publish_files "log-$AOT_SCOPE"
+    echo "::error::full log: https://github.com/3327299/mobilite-ci-probe/blob/main/_ci_logs/log-$AOT_SCOPE.txt" >&3
   fi
   exit $rc
 }
@@ -45,10 +54,9 @@ ROOT=$(dirname "$SRC")
 echo "src root: $ROOT"
 cp -R "$ROOT/." .
 ls -la | head -30
-find Sources -name '*.swift' | wc -l
+echo "swift files: $(find Sources -name '*.swift' | wc -l)"
 
 echo "== 1) 打补丁 =="
-ls -l .ci/patch17.py
 python3 .ci/patch17.py
 
 echo "== 2) JDK 21 =="
@@ -126,7 +134,7 @@ echo "== task: $PICK =="
   -PversionID="$MC_VER" \
   -PaotInput="$TOP/pipeline/build/$MC_VER/aot-input" \
   -PoutDir="$TOP/Frameworks/Versions/$MC_VER" \
-  -ProbovmConfig="$CONFIG"
+  -ProbovmConfig="$CONFIG" 2>&1 | tee /tmp/gradle.log
 cd "$TOP"
 
 echo "== 8) 收产物 + 刷新 versions.json =="
@@ -143,7 +151,7 @@ rm -rf "$OUT/GameRuntime.xcframework" "$OUT/GameRuntime.framework" "$OUT/GameRun
 cp -R "$FOUND" "$OUT/"
 python3 pipeline/scripts/make-registry.py Frameworks/Versions
 cat Frameworks/Versions/versions.json
-grep -q '\"id\": \"1.21.4\"' Frameworks/Versions/versions.json || { echo "::error::versions.json 里没有 $MC_VER"; exit 6; }
+grep -q '"id": "1.21.4"' Frameworks/Versions/versions.json || { echo "::error::versions.json 里没有 $MC_VER"; exit 6; }
 
 echo "== 9) XcodeGen + xcodebuild + IPA =="
 curl -fsSL --retry 5 --retry-all-errors --max-time 300 -o /tmp/xcodegen.zip \
@@ -165,7 +173,7 @@ cp -R "$APP" Payload/
 zip -qry "MobiLite-$MC_VER-$AOT_SCOPE-unsigned.ipa" Payload
 ls -l *.ipa
 
-echo "== 10) 清单 + 上传 =="
+echo "== 10) 清单 + 提交产物 =="
 IPA="MobiLite-$MC_VER-$AOT_SCOPE-unsigned.ipa"
 {
   echo "scope=$AOT_SCOPE"
@@ -187,12 +195,10 @@ IPA="MobiLite-$MC_VER-$AOT_SCOPE-unsigned.ipa"
   du -sh Payload/MobiLite.app
 } > manifest.txt 2>&1
 cat manifest.txt
-for f in "$IPA" manifest.txt; do
-  echo "-- upload $f"
-  curl -sS --max-time 900 -X POST -H "filename: $f" --data-binary @"$f" \
-    "https://filebin.net/$BIN/$f" -o "/tmp/up_$(basename "$f").json" || true
-  grep -o '\"filename\": *\"[^\"]*\"' "/tmp/up_$(basename "$f").json" 2>/dev/null || head -c 200 "/tmp/up_$(basename "$f").json" 2>/dev/null || true
-  echo
-done
+mkdir -p artifacts
+cp "$IPA" manifest.txt artifacts/
+cp /tmp/gradle.log artifacts/gradle-$AOT_SCOPE.log 2>/dev/null || true
+publish_files "artifact-$MC_VER-$AOT_SCOPE" artifacts
+echo "IPA: https://github.com/3327299/mobilite-ci-probe/raw/main/artifacts/$IPA"
 
 echo "== DONE =="

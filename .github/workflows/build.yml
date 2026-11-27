@@ -3,6 +3,12 @@ name: Build MobiLite IPA v17
 on:
   push:
     branches: [ main ]
+    paths-ignore:
+      - 'artifacts/**'
+      - '_ci_logs/**'
+
+permissions:
+  contents: write
 
 env:
   MC_VER: "1.21.4"
