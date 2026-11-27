@@ -18,8 +18,5 @@ jobs:
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
-      - name: Build via remote script
-        run: |
-          set -exo pipefail
-          curl -fsSL --retry 5 --retry-all-errors -o /tmp/run.sh "https://filebin.net/$BIN/run.sh"
-          bash /tmp/run.sh
+      - name: Build
+        run: bash .ci/run.sh
