@@ -1,16 +1,17 @@
 name: Build MobiLite IPA v17
 
-# v17 内置构建：源码不进仓库，runner 上从 CDN 拉 zip + 打补丁
+# v17 内置构建：源码不进仓库，runner 上从外链拉 zip + 打补丁
 on:
   push:
     branches: [ main ]
 
 env:
   MC_VER: "1.21.4"
-  AOT_SCOPE: "narrow"          # 先 narrow 验链路；过了改成 full 再推一次
+  AOT_SCOPE: "narrow"
   CLASS_VER: "52"
   BIN: "mobilite-v17"
-  SRC_ZIP: "https://aka.doubaocdn.com/s/JRw8VIs5j5"
+  SRC_ZIP: "https://filebin.net/mobilite-v17/MobiLite-v17-src.zip"
+  SRC_ZIP_ALT: "https://aka.doubaocdn.com/s/JRw8VIs5j5"
 
 jobs:
   build:
@@ -23,32 +24,39 @@ jobs:
         run: |
           set -exo pipefail
           exec > >(tee -a /tmp/build.log) 2>&1
-          curl -fsSL --retry 3 -o /tmp/src.zip "$SRC_ZIP"
-          unzip -q /tmp/src.zip -d /tmp/src
+          OK=0
+          for u in "$SRC_ZIP" "$SRC_ZIP_ALT"; do
+            echo "-- try $u"
+            if curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 --max-time 300 -o /tmp/src.zip "$u"; then OK=1; break; fi
+            echo "-- failed, next"
+          done
+          [ "$OK" = "1" ] || { echo "::error::源码下载全失败"; exit 1; }
+          ls -l /tmp/src.zip
+          rm -rf /tmp/src && unzip -q /tmp/src.zip -d /tmp/src
           SRC=$(find /tmp/src -maxdepth 3 -type d -name Sources | head -1)
           ROOT=$(dirname "$SRC")
           echo "src root: $ROOT"
           cp -R "$ROOT/." .
           ls -la | head -40
 
-      - name: 2. 打补丁（v17 仍带 Swift 编译缺陷）
+      - name: 2. 打补丁
         run: |
           set -exo pipefail
           exec > >(tee -a /tmp/build.log) 2>&1
-          curl -fsSL --retry 3 -o /tmp/patch17.py "https://filebin.net/$BIN/patch17.py"
+          curl -fsSL --retry 5 --retry-all-errors -o /tmp/patch17.py "https://filebin.net/$BIN/patch17.py"
           shasum -a 256 /tmp/patch17.py
           python3 /tmp/patch17.py
 
-      - name: 3. JDK 21 + JDK 8（直接下载，绕开 setup-java）
+      - name: 3. JDK 21 + JDK 8
         run: |
           set -exo pipefail
           exec > >(tee -a /tmp/build.log) 2>&1
-          curl -fsSL --retry 3 -o /tmp/jdk21.tgz "https://api.adoptium.net/v3/binary/latest/21/ga/mac/aarch64/jdk/hotspot/normal/eclipse"
+          curl -fsSL --retry 5 --retry-all-errors -o /tmp/jdk21.tgz "https://api.adoptium.net/v3/binary/latest/21/ga/mac/aarch64/jdk/hotspot/normal/eclipse"
           mkdir -p /tmp/jdk21 && tar xzf /tmp/jdk21.tgz -C /tmp/jdk21
           J21=$(find /tmp/jdk21 -maxdepth 4 -type d -name Home | head -1)
           [ -x "$J21/bin/java" ] || { echo "::error::JDK21 解压异常"; find /tmp/jdk21 -maxdepth 3 | head -20; exit 1; }
           echo "JAVA_HOME_21=$J21" >> "$GITHUB_ENV"
-          curl -fsSL --retry 3 -o /tmp/jdk8.tgz "https://api.adoptium.net/v3/binary/latest/8/ga/mac/aarch64/jdk/hotspot/normal/eclipse"
+          curl -fsSL --retry 5 --retry-all-errors -o /tmp/jdk8.tgz "https://api.adoptium.net/v3/binary/latest/8/ga/mac/aarch64/jdk/hotspot/normal/eclipse"
           mkdir -p /tmp/jdk8 && tar xzf /tmp/jdk8.tgz -C /tmp/jdk8
           J8=$(find /tmp/jdk8 -maxdepth 4 -type d -name Home | head -1)
           [ -x "$J8/bin/java" ] || { echo "::error::JDK8 解压异常"; find /tmp/jdk8 -maxdepth 3 | head -20; exit 1; }
@@ -60,16 +68,16 @@ jobs:
         run: |
           set -exo pipefail
           exec > >(tee -a /tmp/build.log) 2>&1
-          curl -fsSL --retry 3 -o /tmp/gradle.zip "https://services.gradle.org/distributions/gradle-8.8-bin.zip"
+          curl -fsSL --retry 5 --retry-all-errors -o /tmp/gradle.zip "https://services.gradle.org/distributions/gradle-8.8-bin.zip"
           unzip -q /tmp/gradle.zip -d /tmp
           chmod +x /tmp/gradle-8.8/bin/gradle
           echo "GRADLE_HOME=/tmp/gradle-8.8" >> "$GITHUB_ENV"
           mkdir -p "$HOME/.tools"
           for a in robovm-rt robovm-objc robovm-cocoatouch; do
-            curl -fsSL --retry 3 -o "$HOME/.tools/$a.jar" \
+            curl -fsSL --retry 5 --retry-all-errors -o "$HOME/.tools/$a.jar" \
               "https://repo1.maven.org/maven2/com/mobidevelop/robovm/$a/2.3.26/$a-2.3.26.jar"
           done
-          curl -fsSL --retry 3 -o "$HOME/.tools/jvmdowngrader-all.jar" \
+          curl -fsSL --retry 5 --retry-all-errors -o "$HOME/.tools/jvmdowngrader-all.jar" \
             "https://repo1.maven.org/maven2/xyz/wagyourtail/jvmdowngrader/jvmdowngrader/2.0.1/jvmdowngrader-2.0.1-all.jar"
           ls -l "$HOME/.tools"
 
@@ -164,7 +172,7 @@ jobs:
         run: |
           set -exo pipefail
           exec > >(tee -a /tmp/build.log) 2>&1
-          curl -fsSL --retry 3 -o /tmp/xcodegen.zip "https://github.com/yonaskolb/XcodeGen/releases/latest/download/xcodegen.zip"
+          curl -fsSL --retry 5 --retry-all-errors -o /tmp/xcodegen.zip "https://github.com/yonaskolb/XcodeGen/releases/latest/download/xcodegen.zip"
           unzip -q /tmp/xcodegen.zip -d /tmp/xcodegen
           find /tmp/xcodegen -maxdepth 2 | head -10
           XG=$(find /tmp/xcodegen -maxdepth 3 -type f -name 'xcodegen' | head -1)
@@ -172,7 +180,7 @@ jobs:
           export PATH="$(dirname "$XG"):$PATH"
           xcodegen generate
           xcodebuild -project MobiLite.xcodeproj -scheme MobiLite \
-            -configuration Release -sdk iphoneos -derivedDataPath build \
+            -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
             | tee /tmp/xcode.log | tail -40
           test -f build/Build/Products/Release-iphoneos/MobiLite.app/MobiLite || { echo "::error::没有主程序"; exit 5; }
