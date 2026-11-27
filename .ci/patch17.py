@@ -114,7 +114,38 @@ def f10(s):
     return s[:idx] + "repositories {\n    mavenCentral()\n}\n\n" + s[idx:]
 rw('pipeline/version-build/build.gradle', f10)
 
-# 11) shell 脚本里 "$VAR，" 把全角标点吸进变量名 -> unbound variable
+# 11) robovm.xml 精简到 RoboVM 2.3.26 Config 认识的元素（headers/modulemap 会被 simple-xml 拒绝）
+MIN_ROBOVM = '''<?xml version="1.0" encoding="UTF-8"?>
+<config>
+    <target>xcframework</target>
+    <executableName>GameRuntime</executableName>
+    <mainClass>com.mobilite.game.MobiLiteGame</mainClass>
+
+    <forceLinkClasses>
+        <pattern>com.mobilite.game.**</pattern>
+        <pattern>net.minecraft.**</pattern>
+        <pattern>com.mojang.**</pattern>
+    </forceLinkClasses>
+
+    <frameworks>
+        <framework>Foundation</framework>
+        <framework>UIKit</framework>
+        <framework>OpenGLES</framework>
+        <framework>QuartzCore</framework>
+        <framework>CoreGraphics</framework>
+        <framework>GameController</framework>
+    </frameworks>
+</config>
+'''
+
+
+def f11(s):
+    return MIN_ROBOVM
+
+
+rw('pipeline/version-build/robovm.xml', f11)
+
+# 12) shell 脚本里 "$VAR，" 把全角标点吸进变量名 -> unbound variable
 import glob, re as _re
 for sp in glob.glob('pipeline/**/*.sh', recursive=True):
     src = open(sp, encoding='utf-8').read()

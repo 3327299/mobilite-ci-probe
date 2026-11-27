@@ -7,26 +7,14 @@ exec 3>&1 4>&2
 : > /tmp/build.log
 exec > >(tee -a /tmp/build.log) 2>&1
 
-publish_files() {
-  msg="$1"; shift
-  git config user.name "ci-bot"
-  git config user.email "ci-bot@users.noreply.github.com"
-  git add -A "$@" 2>/dev/null || true
-  git commit -m "$msg [skip ci]" >/dev/null 2>&1 || true
-  git push origin HEAD:refs/heads/main 2>&1 | tail -4 >&3 || true
-}
-
 on_exit() {
   rc=$?
   if [ "$rc" != "0" ]; then
     sleep 2
-    mkdir -p _ci_logs
-    cp /tmp/build.log "_ci_logs/log-$AOT_SCOPE.txt" 2>/dev/null || true
-    grep -nE "What went wrong|FAILURE|Caused by|Execution failed|error:|Unsupported|NoClassDef|Could not" /tmp/build.log 2>/dev/null | tail -18 > /tmp/ctx.log || true
+    grep -nE "What went wrong|FAILURE|Caused by|Execution failed|error:|Unsupported|NoClassDef|Could not|Failed to read|No such file" /tmp/build.log 2>/dev/null | tail -20 > /tmp/ctx.log || true
     while IFS= read -r l; do echo "::error::$l"; done < /tmp/ctx.log >&3
-    G=$(curl -sS --max-time 300 -F "file=@/tmp/build.log" https://upload.gofile.io/uploadfile 2>/dev/null || true)
-    echo "::error::gofile=$G" >&3
-    publish_files "log-$AOT_SCOPE"
+    U=$(curl -sS --max-time 300 -X POST -H "filename: log-$AOT_SCOPE.txt" --data-binary @/tmp/build.log "https://filebin.net/$BIN/log-$AOT_SCOPE.txt" 2>/dev/null || true)
+    echo "::error::log: $U" >&3
   fi
   exit $rc
 }
@@ -48,13 +36,11 @@ if [ "$OK" != "1" ]; then
 fi
 [ "$OK" = "1" ] || { echo "::error::源码下载全失败"; exit 1; }
 unzip -t /tmp/src.zip >/dev/null || { echo "::error::zip 损坏"; exit 1; }
-ls -l /tmp/src.zip
 rm -rf /tmp/src && unzip -q /tmp/src.zip -d /tmp/src
 SRC=$(find /tmp/src -maxdepth 3 -type d -name Sources | head -1)
 ROOT=$(dirname "$SRC")
 echo "src root: $ROOT"
 cp -R "$ROOT/." .
-ls -la | head -30
 echo "swift files: $(find Sources -name '*.swift' | wc -l)"
 
 echo "== 1) 打补丁 =="
@@ -122,6 +108,7 @@ if [ "$AOT_SCOPE" = "narrow" ]; then
   CONFIG="$VB/robovm.narrow.xml"
   ./pipeline/scripts/make-narrow-config.sh "$VB/robovm.xml" "$CONFIG"
 fi
+cat "$CONFIG"
 cd "$VB"
 "$GRADLE_HOME/bin/gradle" tasks --all > /tmp/tasks.txt 2>&1 || tail -40 /tmp/tasks.txt
 grep -iE 'xcframework|createIPA|createFramework|robovm' /tmp/tasks.txt | head -40 || true
@@ -174,7 +161,7 @@ cp -R "$APP" Payload/
 zip -qry "MobiLite-$MC_VER-$AOT_SCOPE-unsigned.ipa" Payload
 ls -l *.ipa
 
-echo "== 10) 清单 + 提交产物 =="
+echo "== 10) 清单 + 上传 =="
 IPA="MobiLite-$MC_VER-$AOT_SCOPE-unsigned.ipa"
 {
   echo "scope=$AOT_SCOPE"
@@ -196,10 +183,14 @@ IPA="MobiLite-$MC_VER-$AOT_SCOPE-unsigned.ipa"
   du -sh Payload/MobiLite.app
 } > manifest.txt 2>&1
 cat manifest.txt
-mkdir -p artifacts
-cp "$IPA" manifest.txt artifacts/
-cp /tmp/gradle.log artifacts/gradle-$AOT_SCOPE.log 2>/dev/null || true
-publish_files "artifact-$MC_VER-$AOT_SCOPE" artifacts
-echo "IPA: https://github.com/3327299/mobilite-ci-probe/raw/main/artifacts/$IPA"
+for f in "$IPA" manifest.txt /tmp/gradle.log /tmp/xcode.log; do
+  [ -f "$f" ] || continue
+  b=$(basename "$f")
+  echo "-- upload $b"
+  curl -sS --max-time 900 -X POST -H "filename: $b" --data-binary @"$f" "https://filebin.net/$BIN/$b" -o "/tmp/up_$b.json" || true
+  grep -o '"filename": *"[^"]*"' "/tmp/up_$b.json" 2>/dev/null || head -c 150 "/tmp/up_$b.json" 2>/dev/null || true
+  echo
+done
+echo "IPA: https://filebin.net/$BIN/$IPA"
 
 echo "== DONE =="
