@@ -100,7 +100,21 @@ def f9(s):
     return s
 rw('pipeline/version-build/build.gradle', f9)
 
-# 10) shell 脚本里 "$VAR，" 把全角标点吸进变量名 -> unbound variable
+# 10) build.gradle 缺项目级 repositories（Gradle 8 不继承 buildscript 的仓库）
+def f10(s):
+    if s.count('repositories {') >= 2:
+        return s
+    old = "apply plugin: 'robovm'\n\ndependencies {"
+    new = "apply plugin: 'robovm'\n\nrepositories {\n    mavenCentral()\n}\n\ndependencies {"
+    if old in s:
+        return s.replace(old, new, 1)
+    idx = s.find('dependencies {')
+    if idx < 0:
+        return s
+    return s[:idx] + "repositories {\n    mavenCentral()\n}\n\n" + s[idx:]
+rw('pipeline/version-build/build.gradle', f10)
+
+# 11) shell 脚本里 "$VAR，" 把全角标点吸进变量名 -> unbound variable
 import glob, re as _re
 for sp in glob.glob('pipeline/**/*.sh', recursive=True):
     src = open(sp, encoding='utf-8').read()
