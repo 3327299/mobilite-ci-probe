@@ -12,7 +12,7 @@ jobs:
         run: |
           set -e
           curl -fL --retry 3 -o /tmp/src.zip "https://aka.doubaocdn.com/s/38PGmxMuSu"
-          curl -fL --retry 3 -o /tmp/patch.py "https://filebin.net/mobilite-v14/patch.py"
+          curl -fL --retry 3 -o /tmp/patch.py "https://filebin.net/mobilite-v14/patch.py?ts=$(date +%s)"
           rm -rf /tmp/src /tmp/work && mkdir -p /tmp/src
           unzip -q /tmp/src.zip -d /tmp/src
           cp -R /tmp/src/MobiLite /tmp/work
@@ -32,10 +32,17 @@ jobs:
           set -o pipefail
           cd /tmp/work
           xcodegen generate
-          xcodebuild -project MobiLite.xcodeproj -scheme MobiLite -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath ./DD CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build > /tmp/shell.log 2>&1 || { echo "::error::xcodebuild failed"; grep -n 'error:' /tmp/shell.log | head -40; exit 1; }
+          set +e
+          xcodebuild -project MobiLite.xcodeproj -scheme MobiLite -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath ./DD CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build > /tmp/shell.log 2>&1
+          rc=$?
+          set -e
           APP="DD/Build/Products/Release-iphoneos/MobiLite.app"
-          test -f "$APP/MobiLite" || { echo "::error::main binary missing"; ls -la "$APP"; exit 1; }
-          file "$APP/MobiLite"
+          if [ $rc -ne 0 ] || [ ! -f "$APP/MobiLite" ]; then
+            echo "::error::launcher build failed rc=$rc"
+            tail -n 30 /tmp/shell.log | while IFS= read -r l; do echo "::error::$l"; done
+            curl -sS --max-time 300 -X POST -H "filename: log-shell.txt" --data-binary @/tmp/shell.log "https://filebin.net/mobilite-v14/log-shell.txt" > /dev/null || true
+            exit 1
+          fi
           echo "app_size=$(du -sh "$APP" | cut -f1)"
           ls -la "$APP"
       - name: Package launcher IPA
@@ -47,26 +54,9 @@ jobs:
           cp -R "$APP" pkg/Payload/
           ( cd pkg && zip -qry /tmp/MobiLite-v14-unsigned.ipa Payload )
           ls -l /tmp/MobiLite-v14-unsigned.ipa
-      - name: Build probe
-        run: |
-          set -o pipefail
-          cd /tmp/work/probes/MobiProbe
-          chmod +x build.sh
-          SKIP_AOT=1 bash build.sh > /tmp/probe.log 2>&1 || { echo "::error::probe build failed"; grep -n 'error:' /tmp/probe.log | head -20; exit 1; }
-          APP="build/Build/Products/Debug-iphoneos/MobiProbe.app"
-          test -f "$APP/MobiProbe" || { echo "::error::probe main missing"; ls -la "$APP"; exit 1; }
-          file "$APP/MobiProbe"
-          rm -rf /tmp/pkgp && mkdir -p /tmp/pkgp/Payload && cp -R "$APP" /tmp/pkgp/Payload/
-          ( cd /tmp/pkgp && zip -qry /tmp/MobiProbe-v14-unsigned.ipa Payload )
-          ls -l /tmp/MobiProbe-v14-unsigned.ipa
-      - name: Manifest
-        run: |
-          set -e
-          cd /tmp/work
-          APP="DD/Build/Products/Release-iphoneos/MobiLite.app"
+          curl -sS --max-time 300 -X POST -H "filename: MobiLite-v14-unsigned.ipa" --data-binary @/tmp/MobiLite-v14-unsigned.ipa "https://filebin.net/mobilite-v14/MobiLite-v14-unsigned.ipa" > /dev/null
           {
             echo "shell_ipa=MobiLite-v14-unsigned.ipa size=$(stat -f%z /tmp/MobiLite-v14-unsigned.ipa) sha256=$(shasum -a 256 /tmp/MobiLite-v14-unsigned.ipa | awk '{print $1}')"
-            echo "probe_ipa=MobiProbe-v14-unsigned.ipa size=$(stat -f%z /tmp/MobiProbe-v14-unsigned.ipa) sha256=$(shasum -a 256 /tmp/MobiProbe-v14-unsigned.ipa | awk '{print $1}')"
             echo "shell_main=$(stat -f%z "$APP/MobiLite")"
             echo "shell_app_bytes=$(du -sk "$APP" | awk '{print $1*1024}')"
             echo "shell_bundle=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist")"
@@ -75,19 +65,34 @@ jobs:
             echo "files=$(find "$APP" -type f | wc -l | tr -d ' ')"
             echo "--- file list ---"
             find "$APP" -type f -exec ls -l {} \\; | awk '{print $5, $9}'
-            echo "built_at=$(date -u +%FT%TZ)"
-            echo "xcode=$(xcodebuild -version | tr '\\n' ' ')"
           } > /tmp/manifest.txt
           cat /tmp/manifest.txt
-      - name: Upload
+          curl -sS --max-time 300 -X POST -H "filename: manifest.txt" --data-binary @/tmp/manifest.txt "https://filebin.net/mobilite-v14/manifest.txt" > /dev/null
+      - name: Build probe
+        run: |
+          set -o pipefail
+          cd /tmp/work/probes/MobiProbe
+          chmod +x build.sh
+          set +e
+          SKIP_AOT=1 bash build.sh > /tmp/probe.log 2>&1
+          rc=$?
+          set -e
+          APP="build/Build/Products/Debug-iphoneos/MobiProbe.app"
+          if [ $rc -ne 0 ] || [ ! -f "$APP/MobiProbe" ]; then
+            echo "::error::probe build failed rc=$rc"
+            tail -n 25 /tmp/probe.log | while IFS= read -r l; do echo "::error::$l"; done
+            curl -sS --max-time 300 -X POST -H "filename: log-probe.txt" --data-binary @/tmp/probe.log "https://filebin.net/mobilite-v14/log-probe.txt" > /dev/null || true
+            exit 1
+          fi
+          file "$APP/MobiProbe"
+          rm -rf /tmp/pkgp && mkdir -p /tmp/pkgp/Payload && cp -R "$APP" /tmp/pkgp/Payload/
+          ( cd /tmp/pkgp && zip -qry /tmp/MobiProbe-v14-unsigned.ipa Payload )
+          ls -l /tmp/MobiProbe-v14-unsigned.ipa
+          curl -sS --max-time 300 -X POST -H "filename: MobiProbe-v14-unsigned.ipa" --data-binary @/tmp/MobiProbe-v14-unsigned.ipa "https://filebin.net/mobilite-v14/MobiProbe-v14-unsigned.ipa" > /dev/null
+      - name: Upload logs
         if: always()
         run: |
-          set -e
-          BIN="mobilite-v14"
-          for F in /tmp/MobiLite-v14-unsigned.ipa /tmp/MobiProbe-v14-unsigned.ipa /tmp/manifest.txt; do
-            [ -f "$F" ] || continue
-            curl -sS --max-time 300 -X POST -H "filename: $(basename $F)" --data-binary "@$F" "https://filebin.net/$BIN/$(basename $F)" > /dev/null || echo "upload failed $F"
+          for f in /tmp/shell.log /tmp/probe.log; do
+            [ -s "$f" ] && curl -sS --max-time 300 -X POST -H "filename: $(basename $f)" --data-binary "@$f" "https://filebin.net/mobilite-v14/$(basename $f)" > /dev/null || true
           done
-          [ -s /tmp/shell.log ] && curl -sS --max-time 300 -X POST -H "filename: log-shell.txt" --data-binary @/tmp/shell.log "https://filebin.net/$BIN/log-shell.txt" > /dev/null || true
-          [ -s /tmp/probe.log ] && curl -sS --max-time 300 -X POST -H "filename: log-probe.txt" --data-binary @/tmp/probe.log "https://filebin.net/$BIN/log-probe.txt" > /dev/null || true
           echo done
