@@ -8,55 +8,46 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - name: Fetch and patch source
+      - name: Prepare source
         run: |
-          set -e
+          set -exo pipefail
+          exec > >(tee /tmp/prep.log) 2>&1
           curl -fL --retry 3 -o /tmp/src.zip "https://aka.doubaocdn.com/s/38PGmxMuSu"
-          curl -fL --retry 3 -o /tmp/patch.py "https://filebin.net/mobilite-v14/patch.py?ts=$(date +%s)"
+          curl -fL --retry 3 -o /tmp/patch.py "https://filebin.net/mobilite-v14/patch.py"
           rm -rf /tmp/src /tmp/work && mkdir -p /tmp/src
           unzip -q /tmp/src.zip -d /tmp/src
           cp -R /tmp/src/MobiLite /tmp/work
           cd /tmp/work
           python3 /tmp/patch.py
+          mkdir -p /tmp/tools
+          curl -fL --retry 3 -o /tmp/xg.zip https://github.com/yonaskolb/XcodeGen/releases/latest/download/xcodegen.zip
+          unzip -q /tmp/xg.zip -d /tmp/tools
+          /tmp/tools/xcodegen/bin/xcodegen --version
           echo "files=$(find . -type f | wc -l | tr -d ' ')"
-      - name: Install xcodegen
-        run: |
-          set -e
-          curl -fL --retry 3 --connect-timeout 20 -o /tmp/xg.zip https://github.com/yonaskolb/XcodeGen/releases/latest/download/xcodegen.zip
-          rm -rf /tmp/xg && mkdir -p /tmp/xg
-          unzip -q /tmp/xg.zip -d /tmp/xg
-          echo /tmp/xg/xcodegen/bin >> $GITHUB_PATH
-          /tmp/xg/xcodegen/bin/xcodegen --version
       - name: Build launcher
         run: |
-          set -o pipefail
+          set -exo pipefail
+          exec > >(tee /tmp/shell.log) 2>&1
+          export PATH=/tmp/tools/xcodegen/bin:$PATH
           cd /tmp/work
           xcodegen generate
-          set +e
-          xcodebuild -project MobiLite.xcodeproj -scheme MobiLite -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath ./DD CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build > /tmp/shell.log 2>&1
-          rc=$?
-          set -e
+          xcodebuild -project MobiLite.xcodeproj -scheme MobiLite -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath ./DD CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
           APP="DD/Build/Products/Release-iphoneos/MobiLite.app"
-          if [ $rc -ne 0 ] || [ ! -f "$APP/MobiLite" ]; then
-            echo "::error::launcher build failed rc=$rc"
-            tail -n 30 /tmp/shell.log | while IFS= read -r l; do echo "::error::$l"; done
-            curl -sS --max-time 300 -X POST -H "filename: log-shell.txt" --data-binary @/tmp/shell.log "https://filebin.net/mobilite-v14/log-shell.txt" > /dev/null || true
-            exit 1
-          fi
-          echo "app_size=$(du -sh "$APP" | cut -f1)"
-          ls -la "$APP"
-      - name: Package launcher IPA
-        run: |
-          set -e
-          cd /tmp/work
-          APP="DD/Build/Products/Release-iphoneos/MobiLite.app"
+          test -f "$APP/MobiLite"
           rm -rf pkg && mkdir -p pkg/Payload
           cp -R "$APP" pkg/Payload/
           ( cd pkg && zip -qry /tmp/MobiLite-v14-unsigned.ipa Payload )
           ls -l /tmp/MobiLite-v14-unsigned.ipa
-          curl -sS --max-time 300 -X POST -H "filename: MobiLite-v14-unsigned.ipa" --data-binary @/tmp/MobiLite-v14-unsigned.ipa "https://filebin.net/mobilite-v14/MobiLite-v14-unsigned.ipa" > /dev/null
+      - name: Publish launcher
+        if: success()
+        run: |
+          set -ex
+          curl -sS --max-time 300 -X POST -H "filename: MobiLite-v14-unsigned.ipa" --data-binary @/tmp/MobiLite-v14-unsigned.ipa "https://filebin.net/mobilite-v14/MobiLite-v14-unsigned.ipa"
+          cd /tmp/work
+          APP="DD/Build/Products/Release-iphoneos/MobiLite.app"
           {
-            echo "shell_ipa=MobiLite-v14-unsigned.ipa size=$(stat -f%z /tmp/MobiLite-v14-unsigned.ipa) sha256=$(shasum -a 256 /tmp/MobiLite-v14-unsigned.ipa | awk '{print $1}')"
+            echo "shell_size=$(stat -f%z /tmp/MobiLite-v14-unsigned.ipa)"
+            echo "shell_sha256=$(shasum -a 256 /tmp/MobiLite-v14-unsigned.ipa | awk '{print $1}')"
             echo "shell_main=$(stat -f%z "$APP/MobiLite")"
             echo "shell_app_bytes=$(du -sk "$APP" | awk '{print $1*1024}')"
             echo "shell_bundle=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist")"
@@ -67,32 +58,29 @@ jobs:
             find "$APP" -type f -exec ls -l {} \\; | awk '{print $5, $9}'
           } > /tmp/manifest.txt
           cat /tmp/manifest.txt
-          curl -sS --max-time 300 -X POST -H "filename: manifest.txt" --data-binary @/tmp/manifest.txt "https://filebin.net/mobilite-v14/manifest.txt" > /dev/null
+          curl -sS --max-time 300 -X POST -H "filename: manifest.txt" --data-binary @/tmp/manifest.txt "https://filebin.net/mobilite-v14/manifest.txt"
       - name: Build probe
         run: |
-          set -o pipefail
+          set -exo pipefail
+          exec > >(tee /tmp/probe.log) 2>&1
+          export PATH=/tmp/tools/xcodegen/bin:$PATH
           cd /tmp/work/probes/MobiProbe
           chmod +x build.sh
-          set +e
-          SKIP_AOT=1 bash build.sh > /tmp/probe.log 2>&1
-          rc=$?
-          set -e
+          SKIP_AOT=1 bash build.sh
           APP="build/Build/Products/Debug-iphoneos/MobiProbe.app"
-          if [ $rc -ne 0 ] || [ ! -f "$APP/MobiProbe" ]; then
-            echo "::error::probe build failed rc=$rc"
-            tail -n 25 /tmp/probe.log | while IFS= read -r l; do echo "::error::$l"; done
-            curl -sS --max-time 300 -X POST -H "filename: log-probe.txt" --data-binary @/tmp/probe.log "https://filebin.net/mobilite-v14/log-probe.txt" > /dev/null || true
-            exit 1
-          fi
-          file "$APP/MobiProbe"
-          rm -rf /tmp/pkgp && mkdir -p /tmp/pkgp/Payload && cp -R "$APP" /tmp/pkgp/Payload/
+          test -f "$APP/MobiProbe"
+          rm -rf /tmp/pkgp && mkdir -p /tmp/pkgp/Payload
+          cp -R "$APP" /tmp/pkgp/Payload/
           ( cd /tmp/pkgp && zip -qry /tmp/MobiProbe-v14-unsigned.ipa Payload )
           ls -l /tmp/MobiProbe-v14-unsigned.ipa
-          curl -sS --max-time 300 -X POST -H "filename: MobiProbe-v14-unsigned.ipa" --data-binary @/tmp/MobiProbe-v14-unsigned.ipa "https://filebin.net/mobilite-v14/MobiProbe-v14-unsigned.ipa" > /dev/null
-      - name: Upload logs
-        if: always()
+          curl -sS --max-time 300 -X POST -H "filename: MobiProbe-v14-unsigned.ipa" --data-binary @/tmp/MobiProbe-v14-unsigned.ipa "https://filebin.net/mobilite-v14/MobiProbe-v14-unsigned.ipa"
+      - name: Dump logs on failure
+        if: failure()
         run: |
-          for f in /tmp/shell.log /tmp/probe.log; do
-            [ -s "$f" ] && curl -sS --max-time 300 -X POST -H "filename: $(basename $f)" --data-binary "@$f" "https://filebin.net/mobilite-v14/$(basename $f)" > /dev/null || true
+          set +e
+          for f in /tmp/prep.log /tmp/shell.log /tmp/probe.log; do
+            [ -s "$f" ] || continue
+            echo "===== $f (tail 40) ====="
+            tail -n 40 "$f" | while IFS= read -r l; do echo "::error::$l"; done
+            curl -sS --max-time 300 -X POST -H "filename: $(basename $f)" --data-binary "@$f" "https://filebin.net/mobilite-v14/$(basename $f)"
           done
-          echo done
