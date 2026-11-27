@@ -1,87 +1,226 @@
-name: build
+name: Build MobiLite IPA v17
+
+# v17 内置构建：源码不进仓库，runner 上从 CDN 拉 zip + 打补丁
 on:
   push:
-  workflow_dispatch:
+    branches: [ main ]
+
+env:
+  MC_VER: "1.21.4"
+  AOT_SCOPE: "narrow"          # 先 narrow 验链路；过了改成 full 再推一次
+  CLASS_VER: "52"
+  BIN: "mobilite-v17"
+  SRC_ZIP: "https://aka.doubaocdn.com/s/JRw8VIs5j5"
+
 jobs:
   build:
     runs-on: macos-15
-    timeout-minutes: 90
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
-      - name: Prepare source
+
+      - name: 1. 取 v17 源码
         run: |
           set -exo pipefail
-          exec > >(tee /tmp/prep.log) 2>&1
-          curl -fL --retry 3 -o /tmp/src.zip "https://aka.doubaocdn.com/s/38PGmxMuSu"
-          curl -fL --retry 3 -o /tmp/patch.py "https://filebin.net/mobilite-v14/patch.py"
-          rm -rf /tmp/src /tmp/work && mkdir -p /tmp/src
+          exec > >(tee -a /tmp/build.log) 2>&1
+          curl -fsSL --retry 3 -o /tmp/src.zip "$SRC_ZIP"
           unzip -q /tmp/src.zip -d /tmp/src
-          cp -R /tmp/src/MobiLite /tmp/work
-          cd /tmp/work
-          python3 /tmp/patch.py
-          mkdir -p /tmp/tools
-          curl -fL --retry 3 -o /tmp/xg.zip https://github.com/yonaskolb/XcodeGen/releases/latest/download/xcodegen.zip
-          unzip -q /tmp/xg.zip -d /tmp/tools
-          /tmp/tools/xcodegen/bin/xcodegen --version
-          echo "files=$(find . -type f | wc -l | tr -d ' ')"
-      - name: Build launcher
+          SRC=$(find /tmp/src -maxdepth 3 -type d -name Sources | head -1)
+          ROOT=$(dirname "$SRC")
+          echo "src root: $ROOT"
+          cp -R "$ROOT/." .
+          ls -la | head -40
+
+      - name: 2. 打补丁（v17 仍带 Swift 编译缺陷）
         run: |
           set -exo pipefail
-          exec > >(tee /tmp/shell.log) 2>&1
-          export PATH=/tmp/tools/xcodegen/bin:$PATH
-          cd /tmp/work
+          exec > >(tee -a /tmp/build.log) 2>&1
+          curl -fsSL --retry 3 -o /tmp/patch17.py "https://filebin.net/$BIN/patch17.py"
+          shasum -a 256 /tmp/patch17.py
+          python3 /tmp/patch17.py
+
+      - name: 3. JDK 21 + JDK 8（直接下载，绕开 setup-java）
+        run: |
+          set -exo pipefail
+          exec > >(tee -a /tmp/build.log) 2>&1
+          curl -fsSL --retry 3 -o /tmp/jdk21.tgz "https://api.adoptium.net/v3/binary/latest/21/ga/mac/aarch64/jdk/hotspot/normal/eclipse"
+          mkdir -p /tmp/jdk21 && tar xzf /tmp/jdk21.tgz -C /tmp/jdk21
+          J21=$(find /tmp/jdk21 -maxdepth 4 -type d -name Home | head -1)
+          [ -x "$J21/bin/java" ] || { echo "::error::JDK21 解压异常"; find /tmp/jdk21 -maxdepth 3 | head -20; exit 1; }
+          echo "JAVA_HOME_21=$J21" >> "$GITHUB_ENV"
+          curl -fsSL --retry 3 -o /tmp/jdk8.tgz "https://api.adoptium.net/v3/binary/latest/8/ga/mac/aarch64/jdk/hotspot/normal/eclipse"
+          mkdir -p /tmp/jdk8 && tar xzf /tmp/jdk8.tgz -C /tmp/jdk8
+          J8=$(find /tmp/jdk8 -maxdepth 4 -type d -name Home | head -1)
+          [ -x "$J8/bin/java" ] || { echo "::error::JDK8 解压异常"; find /tmp/jdk8 -maxdepth 3 | head -20; exit 1; }
+          echo "JAVA_HOME_8=$J8" >> "$GITHUB_ENV"
+          "$J21/bin/java" -version 2>&1 | head -2
+          "$J8/bin/java" -version 2>&1 | head -2
+
+      - name: 4. Gradle 8.8 + MobiVM 运行时 + JvmDowngrader
+        run: |
+          set -exo pipefail
+          exec > >(tee -a /tmp/build.log) 2>&1
+          curl -fsSL --retry 3 -o /tmp/gradle.zip "https://services.gradle.org/distributions/gradle-8.8-bin.zip"
+          unzip -q /tmp/gradle.zip -d /tmp
+          chmod +x /tmp/gradle-8.8/bin/gradle
+          echo "GRADLE_HOME=/tmp/gradle-8.8" >> "$GITHUB_ENV"
+          mkdir -p "$HOME/.tools"
+          for a in robovm-rt robovm-objc robovm-cocoatouch; do
+            curl -fsSL --retry 3 -o "$HOME/.tools/$a.jar" \
+              "https://repo1.maven.org/maven2/com/mobidevelop/robovm/$a/2.3.26/$a-2.3.26.jar"
+          done
+          curl -fsSL --retry 3 -o "$HOME/.tools/jvmdowngrader-all.jar" \
+            "https://repo1.maven.org/maven2/xyz/wagyourtail/jvmdowngrader/jvmdowngrader/2.0.1/jvmdowngrader-2.0.1-all.jar"
+          ls -l "$HOME/.tools"
+
+      - name: 5. 拉官方 1.21.4 + 生成 API 桩包
+        run: |
+          set -exo pipefail
+          exec > >(tee -a /tmp/build.log) 2>&1
+          export JAVA_HOME="$JAVA_HOME_21"
+          export PATH="$JAVA_HOME/bin:$PATH"
+          python3 pipeline/scripts/fetch-vanilla.py "$MC_VER" "/tmp/mc$MC_VER"
+          ls -l "/tmp/mc$MC_VER/client.jar"
+          ./pipeline/api-jar/build.sh
+          ls -l pipeline/out/ || true
+
+      - name: 6. 全量降级到 52
+        run: |
+          set -exo pipefail
+          exec > >(tee -a /tmp/build.log) 2>&1
+          export JAVA_HOME="$JAVA_HOME_21"
+          export PATH="$JAVA_HOME/bin:$PATH"
+          export JVD_JAR="$HOME/.tools/jvmdowngrader-all.jar"
+          mkdir -p "Frameworks/Versions/$MC_VER"
+          cp "/tmp/mc$MC_VER/$MC_VER.json" "Frameworks/Versions/$MC_VER/version.json"
+          API_JAR="$PWD/pipeline/out/api-java21-down52.jar" \
+            ./pipeline/scripts/downgrade-all.sh "/tmp/mc$MC_VER/client.jar" "/tmp/mc$MC_VER/libs" "pipeline/build/$MC_VER/dg" "$CLASS_VER"
+          ls -l "pipeline/build/$MC_VER/dg/client-shaded.jar"
+
+      - name: 7. 组装 AOT 输入
+        run: |
+          set -exo pipefail
+          exec > >(tee -a /tmp/build.log) 2>&1
+          export JAVA_HOME="$JAVA_HOME_21"
+          export PATH="$JAVA_HOME/bin:$PATH"
+          cp "pipeline/build/$MC_VER/dg/client-shaded.jar" "pipeline/build/$MC_VER/mc-downgraded.jar"
+          ROBOVM_RT="$HOME/.tools/robovm-rt.jar" \
+          ROBOVM_OBJC="$HOME/.tools/robovm-objc.jar" \
+          ROBOVM_COCOA="$HOME/.tools/robovm-cocoatouch.jar" \
+            ./pipeline/scripts/assemble-aot-input.sh \
+              "pipeline/build/$MC_VER/mc-downgraded.jar" \
+              "pipeline/build/$MC_VER/dg/libs" \
+              "pipeline/build/$MC_VER/aot-input"
+          unzip -t "pipeline/build/$MC_VER/aot-input/aot-input.jar" | tail -2
+
+      - name: 8. MobiVM AOT (scope=${{ env.AOT_SCOPE }})
+        run: |
+          set -exo pipefail
+          exec > >(tee -a /tmp/build.log) 2>&1
+          export JAVA_HOME="$JAVA_HOME_8"
+          export PATH="$JAVA_HOME/bin:$PATH"
+          echo "gradle 用 JDK: $(java -version 2>&1 | head -1)"
+          TOP="$PWD"
+          VB="$TOP/pipeline/version-build"
+          CONFIG="$VB/robovm.xml"
+          if [ "$AOT_SCOPE" = "narrow" ]; then
+            CONFIG="$VB/robovm.narrow.xml"
+            ./pipeline/scripts/make-narrow-config.sh "$VB/robovm.xml" "$CONFIG"
+          fi
+          cd "$VB"
+          "$GRADLE_HOME/bin/gradle" tasks --all > /tmp/tasks.txt 2>&1 || tail -30 /tmp/tasks.txt
+          grep -iE 'xcframework|createIPA|createFramework|robovm' /tmp/tasks.txt | head -30 || true
+          PICK=""
+          for t in robovmXcframework createXcframework createFramework createIPA; do
+            if grep -q "$t" /tmp/tasks.txt; then PICK=$t; break; fi
+          done
+          [ -z "$PICK" ] && PICK=createIPA
+          echo "== task: $PICK =="
+          "$GRADLE_HOME/bin/gradle" "$PICK" --stacktrace \
+            -PversionID="$MC_VER" \
+            -PaotInput="$TOP/pipeline/build/$MC_VER/aot-input" \
+            -PoutDir="$TOP/Frameworks/Versions/$MC_VER" \
+            -ProbovmConfig="$CONFIG"
+
+      - name: 9. 收产物 + 刷新 versions.json
+        run: |
+          set -exo pipefail
+          exec > >(tee -a /tmp/build.log) 2>&1
+          OUT="Frameworks/Versions/$MC_VER"
+          echo "== 产物目录 =="
+          ls -laR "$OUT" | head -80
+          FOUND=$(find pipeline/version-build/build -maxdepth 8 \( -name 'GameRuntime.xcframework' -o -name 'GameRuntime.framework' -o -name 'GameRuntime.dylib' \) 2>/dev/null | head -1)
+          if [ -z "$FOUND" ]; then
+            echo "::error::AOT 没出 GameRuntime 产物"
+            find pipeline/version-build/build -maxdepth 4 | head -60
+            exit 4
+          fi
+          echo "found: $FOUND"
+          cp -R "$FOUND" "$OUT/"
+          python3 pipeline/scripts/make-registry.py Frameworks/Versions
+          cat Frameworks/Versions/versions.json
+
+      - name: 10. XcodeGen + xcodebuild + IPA
+        run: |
+          set -exo pipefail
+          exec > >(tee -a /tmp/build.log) 2>&1
+          curl -fsSL --retry 3 -o /tmp/xcodegen.zip "https://github.com/yonaskolb/XcodeGen/releases/latest/download/xcodegen.zip"
+          unzip -q /tmp/xcodegen.zip -d /tmp/xcodegen
+          find /tmp/xcodegen -maxdepth 2 | head -10
+          XG=$(find /tmp/xcodegen -maxdepth 3 -type f -name 'xcodegen' | head -1)
+          chmod +x "$XG"
+          export PATH="$(dirname "$XG"):$PATH"
           xcodegen generate
-          xcodebuild -project MobiLite.xcodeproj -scheme MobiLite -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath ./DD CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
-          APP="DD/Build/Products/Release-iphoneos/MobiLite.app"
-          test -f "$APP/MobiLite"
-          rm -rf pkg && mkdir -p pkg/Payload
-          cp -R "$APP" pkg/Payload/
-          ( cd pkg && zip -qry /tmp/MobiLite-v14-unsigned.ipa Payload )
-          ls -l /tmp/MobiLite-v14-unsigned.ipa
-      - name: Publish launcher and probe
+          xcodebuild -project MobiLite.xcodeproj -scheme MobiLite \
+            -configuration Release -sdk iphoneos -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            | tee /tmp/xcode.log | tail -40
+          test -f build/Build/Products/Release-iphoneos/MobiLite.app/MobiLite || { echo "::error::没有主程序"; exit 5; }
+          rm -rf Payload && mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/MobiLite.app Payload/
+          zip -qry "MobiLite-$MC_VER-$AOT_SCOPE-unsigned.ipa" Payload
+          ls -l *.ipa
+
+      - name: 11. 清单 + 上传 filebin
         run: |
           set -exo pipefail
-          exec > >(tee /tmp/pub.log) 2>&1
-          export PATH=/tmp/tools/xcodegen/bin:$PATH
-          curl -sS --max-time 300 -X POST -H "filename: MobiLite-v14-unsigned.ipa" --data-binary @/tmp/MobiLite-v14-unsigned.ipa "https://filebin.net/mobilite-v14/MobiLite-v14-unsigned.ipa"
-          cd /tmp/work/probes/MobiProbe
-          chmod +x build.sh
-          SKIP_AOT=1 bash build.sh
-          APP="build/Build/Products/Debug-iphoneos/MobiProbe.app"
-          test -f "$APP/MobiProbe"
-          rm -rf /tmp/pkgp && mkdir -p /tmp/pkgp/Payload
-          cp -R "$APP" /tmp/pkgp/Payload/
-          ( cd /tmp/pkgp && zip -qry /tmp/MobiProbe-v14-unsigned.ipa Payload )
-          ls -l /tmp/MobiProbe-v14-unsigned.ipa
-          curl -sS --max-time 300 -X POST -H "filename: MobiProbe-v14-unsigned.ipa" --data-binary @/tmp/MobiProbe-v14-unsigned.ipa "https://filebin.net/mobilite-v14/MobiProbe-v14-unsigned.ipa"
-      - name: Info
-        continue-on-error: true
-        run: |
-          cd /tmp/work
-          APP="DD/Build/Products/Release-iphoneos/MobiLite.app"
-          PAPP="probes/MobiProbe/build/Build/Products/Debug-iphoneos/MobiProbe.app"
+          exec > >(tee -a /tmp/build.log) 2>&1
+          IPA="MobiLite-$MC_VER-$AOT_SCOPE-unsigned.ipa"
+          APP="Payload/MobiLite.app"
           {
-            echo "shell_ipa_size=$(stat -f%z /tmp/MobiLite-v14-unsigned.ipa)"
-            echo "shell_sha256=$(shasum -a 256 /tmp/MobiLite-v14-unsigned.ipa | awk '{print $1}')"
-            echo "shell_main=$(stat -f%z "$APP/MobiLite")"
-            echo "shell_app_bytes=$(du -sk "$APP" | awk '{print $1*1024}')"
-            echo "shell_bundle=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist")"
-            echo "shell_minios=$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$APP/Info.plist" 2>/dev/null || echo unknown)"
-            echo "assets_car=$(stat -f%z "$APP/Assets.car" 2>/dev/null || echo 0)"
-            echo "probe_ipa_size=$(stat -f%z /tmp/MobiProbe-v14-unsigned.ipa)"
-            echo "probe_main=$(stat -f%z "$PAPP/MobiProbe")"
-            echo "--- shell app tree ---"
-            ls -laR "$APP"
-          } > /tmp/manifest.txt 2>&1
-          cat /tmp/manifest.txt
-          curl -sS --max-time 300 -X POST -H "filename: manifest.txt" --data-binary @/tmp/manifest.txt "https://filebin.net/mobilite-v14/manifest.txt"
-      - name: Dump logs on failure
+            echo "scope=$AOT_SCOPE"
+            echo "ipa=$IPA"
+            echo "ipa_bytes=$(stat -f%z "$IPA")"
+            echo "ipa_sha256=$(shasum -a 256 "$IPA" | cut -d' ' -f1)"
+            echo "== 主程序"
+            ls -l "$APP/MobiLite"
+            file "$APP/MobiLite"
+            echo "== Frameworks/Versions"
+            ls -laR "$APP/Frameworks/Versions" | head -80
+            echo "== versions.json"
+            cat "$APP/Frameworks/Versions/versions.json" 2>/dev/null || echo "(缺)"
+            echo "== plist"
+            /usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" "$APP/Info.plist" 2>/dev/null
+            /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Info.plist" 2>/dev/null
+            /usr/libexec/PlistBuddy -c "Print :UIFileSharingEnabled" "$APP/Info.plist" 2>/dev/null
+            echo "== app 大小"
+            du -sh "$APP"
+          } > manifest.txt 2>&1
+          cat manifest.txt
+          for f in "$IPA" manifest.txt; do
+            echo "-- upload $f"
+            curl -sS --max-time 900 -X POST -H "filename: $f" --data-binary @"$f" \
+              "https://filebin.net/$BIN/$f" -o "/tmp/up_$(basename "$f").json" || true
+            grep -o '"filename": *"[^"]*"' "/tmp/up_$(basename "$f").json" 2>/dev/null || head -c 200 "/tmp/up_$(basename "$f").json" 2>/dev/null || true
+            echo
+          done
+
+      - name: 12. 失败时把日志注入 annotations
         if: failure()
         run: |
-          set +e
-          for f in /tmp/prep.log /tmp/shell.log /tmp/pub.log; do
-            [ -s "$f" ] || continue
-            echo "===== $f (tail 40) ====="
-            tail -n 40 "$f" | while IFS= read -r l; do echo "::error::$l"; done
-            curl -sS --max-time 300 -X POST -H "filename: $(basename $f)" --data-binary "@$f" "https://filebin.net/mobilite-v14/$(basename $f)"
-          done
+          echo "== 尾部日志 =="
+          tail -n 60 /tmp/build.log 2>/dev/null | while IFS= read -r l; do echo "::error::$l"; done
+          tail -n 200 /tmp/build.log > /tmp/build-tail.log 2>/dev/null || true
+          curl -sS --max-time 300 -X POST -H "filename: build-log-$AOT_SCOPE.txt" --data-binary @/tmp/build-tail.log \
+            "https://filebin.net/$BIN/build-log-$AOT_SCOPE.txt" >/dev/null 2>&1 || true
+          echo "log uploaded"
