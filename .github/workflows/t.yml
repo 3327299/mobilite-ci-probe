@@ -1,0 +1,20 @@
+name: t
+on: push
+permissions:
+  contents: write
+jobs:
+  t:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: report
+        run: |
+          set -e
+          {
+            echo "runner=$(uname -m) $(sw_vers -productVersion)"
+            xcodebuild -version | tr '\n' ' '
+            echo
+            date -u +%FT%TZ
+          } > r.txt
+          cat r.txt
+          curl -sS --max-time 120 -X POST -H "filename: r.txt" --data-binary @r.txt https://filebin.net/pubtest-mbl/r.txt || true
