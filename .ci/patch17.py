@@ -1,0 +1,102 @@
+import os
+
+def rw(p, fn):
+    s = open(p, encoding='utf-8').read()
+    s2 = fn(s)
+    if s2 == s:
+        print("WARN no change:", p)
+    open(p, 'w', encoding='utf-8').write(s2)
+
+# 1) Diagnostics 缺 SwiftUI
+def f1(s):
+    if 'import SwiftUI' in s:
+        return s
+    return s.replace('import Foundation\nimport UIKit\n',
+                     'import Foundation\nimport UIKit\nimport SwiftUI\n', 1)
+rw('Sources/Support/Diagnostics.swift', f1)
+
+# 2) Diagnostics 账号行少一个右括号
+def f2(s):
+    return s.replace('(s.isOffline ? "长期有效" : (s.isExpired ? "token 已过期" : "token 有效")))',
+                     '(s.isOffline ? "长期有效" : (s.isExpired ? "token 已过期" : "token 有效"))))', 1)
+rw('Sources/Support/Diagnostics.swift', f2)
+
+# 3) VersionStorage 少右括号
+def f3(s):
+    return s.replace('setKey("renderDistance", String(max(2, min(32, renderDistance)))',
+                     'setKey("renderDistance", String(max(2, min(32, renderDistance))))')
+rw('Sources/Versions/VersionStorage.swift', f3)
+
+# 4) AOTRuntime encode 是 throwing
+def f4(s):
+    return s.replace('if let data = JSONEncoder.pretty.encode(masked) {',
+                     'if let data = try? JSONEncoder.pretty.encode(masked) {')
+rw('Sources/Runtime/AOTRuntime.swift', f4)
+
+# 5) HardwareInput：rightButton 可选 + GCKeyboard handler 签名冲突
+def f5(s):
+    s = s.replace('input?.rightButton.pressedChangedHandler', 'input?.rightButton?.pressedChangedHandler')
+    old = '''    private func connectKeyboard() {
+        if let kb = GCKeyboard.coalesced {
+            kb.keyboardInput?.keyChangedHandler = { _, key, pressed in
+                guard let key, let code = Self.gcKeyCode(key) else { return }
+                InputBridge.shared.key(code, down: pressed)
+            }
+        }
+        observers.append(NotificationCenter.default.addObserver(
+            forName: .GCKeyboardDidConnect, object: nil, queue: .main) { note in
+            guard let kb = note.object as? GCKeyboard else { return }
+            kb.keyboardInput?.keyChangedHandler = { _, key, pressed in
+                guard let key, let code = Self.gcKeyCode(key) else { return }
+                InputBridge.shared.key(code, down: pressed)
+            }
+        })
+    }'''
+    new = '''    private func connectKeyboard() {
+        // GCKeyboardInput.keyChangedHandler 在不同 SDK 里参数类型不一致，
+        // 硬挂会编不过；键盘走 UIKit 的 pressesBegan/Ended 主路径。
+        observers.append(NotificationCenter.default.addObserver(
+            forName: .GCKeyboardDidConnect, object: nil, queue: .main) { _ in
+            Log.shared.info("GCKeyboard connected (using UIKey path)")
+        })
+    }'''
+    return s.replace(old, new)
+rw('Sources/Input/HardwareInput.swift', f5)
+
+# 6) MicrosoftAuth switch 缺分支
+def f6(s):
+    old = '''            case .cancelled: return "已取消登录"
+            }'''
+    new = '''            case .cancelled: return "已取消登录"
+            case .missingClientID: return "没有配置微软应用 ID"
+            case let .clientIDRejected(msg): return "应用 ID 被微软拒绝：\\(msg)"
+            }'''
+    return s.replace(old, new, 1)
+rw('Sources/Auth/MicrosoftAuth.swift', f6)
+
+# 7) Preflight read 多套了一层可选
+def f7(s):
+    old = 'guard let chunk = try? fh.read(upToCount: 1 << 20), let c = chunk, !c.isEmpty else { break }'
+    new = 'guard let chunk = try? fh.read(upToCount: 1 << 20), !chunk.isEmpty else { break }'
+    s = s.replace(old, new)
+    s = s.replace('            var buf = carry\n            buf.append(c)',
+                  '            var buf = carry\n            buf.append(chunk)')
+    return s
+rw('Sources/Runtime/Preflight.swift', f7)
+
+# 8) Views 三元里 secondary/red 类型不一致
+def f8(s):
+    return s.replace('.foregroundStyle(auth.hasClientID ? .secondary : .red)',
+                     '.foregroundStyle(auth.hasClientID ? Color.secondary : Color.red)')
+rw('Sources/Views/Views.swift', f8)
+
+# 9) shell 脚本里 "$VAR，" 把全角标点吸进变量名 -> unbound variable
+import glob, re as _re
+for sp in glob.glob('pipeline/**/*.sh', recursive=True):
+    src = open(sp, encoding='utf-8').read()
+    fixed = _re.sub(r'\$([A-Za-z_][A-Za-z0-9_]*)(?=[^\x00-\x7f])', r'${\1}', src)
+    if fixed != src:
+        open(sp, 'w', encoding='utf-8').write(fixed)
+        print("sh-cjk fix:", sp)
+
+print("v17 patch done")
