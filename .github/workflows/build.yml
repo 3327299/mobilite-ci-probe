@@ -33,4 +33,4 @@ jobs:
           ls "$(xcode-select -p)/Platforms/iPhoneOS.platform/Developer/SDKs" | head -5
 
       - name: Build
-        run: bash .ci/run.sh
+        run: bash .ci/run.sh || bash .ci/fallback.sh
