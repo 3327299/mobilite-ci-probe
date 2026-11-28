@@ -37,11 +37,12 @@ jobs:
           cp -R "$ROOT/." .
           ls Sources | head
 
-      - name: 修 shell 全角变量名
+      - name: 修 shell 全角变量名 + gradle repositories
         run: |
           set -x
           python3 .ci/patch_cjk.py
-          grep -n 'OUT_JAR' pipeline/scripts/make-stub-jar.sh | head -3
+          python3 .ci/patch_gradle.py
+          grep -n -A3 '^repositories' pipeline/version-build/build.gradle | head -8
 
       - name: 工具链（JDK21 / gradle8.8 / RoboVM 3.0.1 四件套 / JvmDowngrader）
         run: |
