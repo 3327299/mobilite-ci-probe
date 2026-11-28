@@ -28,7 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 拉 v29 源码
+      - name: 拉 v29 源码 + ObjC 补丁
         run: |
           set -x
           curl -fsSL --retry 5 --retry-all-errors --max-time 600 -o /tmp/src.zip "$SRC_ZIP"
@@ -36,7 +36,10 @@ jobs:
           ROOT=$(dirname "$(find /tmp/src -maxdepth 3 -type d -name Sources | head -1)")
           echo "src root: $ROOT"
           cp -R "$ROOT/." .
-          ls Sources; ls bridge/glfw-ios
+          python3 .ci/patch_objc.py
+          grep -n "static CAEAGLLayer" bridge/glfw-ios/GLFWIos.m
+          grep -n "dlfcn" bridge/glfw-ios/MobiEGL.m
+          grep -c "pushEventType" bridge/glfw-ios/GLFWIos.m
 
       - name: 工具链与 xcodegen
         run: |
