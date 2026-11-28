@@ -1,4 +1,4 @@
-name: Build MobiLite IPA v18
+name: Build MobiLite IPA v19
 
 on:
   push:
@@ -15,9 +15,9 @@ env:
   MC_VER: "1.21.4"
   AOT_SCOPE: "narrow"
   CLASS_VER: "52"
-  BIN: "mobilite-v18"
-  SRC_ZIP: "https://aka.doubaocdn.com/s/oVMkvRdfUQ"
-  SRC_ZIP_ALT: "https://aka.doubaocdn.com/s/oVMkvRdfUQ"
+  BIN: "mobilite-v19"
+  SRC_ZIP: "https://aka.doubaocdn.com/s/X3CCGdXuSy"
+  SRC_ZIP_ALT: "https://aka.doubaocdn.com/s/X3CCGdXuSy"
 
 jobs:
   build:
@@ -26,11 +26,65 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 固定 Xcode / 工具链路径
+      - name: 固定 Xcode 路径
         run: |
-          echo "xcode-select: $(xcode-select -p)"
           echo "DEVELOPER_DIR=$(xcode-select -p)" >> "$GITHUB_ENV"
-          ls "$(xcode-select -p)/Platforms/iPhoneOS.platform/Developer/SDKs" | head -5
+          xcode-select -p
+
+      - name: AOT 任务改为 robovmInstall
+        run: |
+          sed -i '' 's/for t in robovmXcframework createXcframework createFramework createIPA; do/for t in robovmInstall robovmXcframework createXcframework createFramework createIPA; do/' .ci/run.sh
+          grep -n "for t in" .ci/run.sh
 
       - name: Build
         run: bash .ci/run.sh || bash .ci/fallback.sh
+
+      - name: 兜底：收产物并打 IPA
+        if: always()
+        run: |
+          set +e
+          cd "${GITHUB_WORKSPACE:-$PWD}"
+          if ls -1 *.ipa >/dev/null 2>&1; then echo "already has ipa"; exit 0; fi
+          FOUND=$(find . -maxdepth 12 \( -name 'GameRuntime.xcframework' -o -name 'GameRuntime.framework' \) 2>/dev/null | head -1)
+          echo "framework=$FOUND"
+          if [ -n "$FOUND" ]; then
+            OUT="Frameworks/Versions/$MC_VER"
+            mkdir -p "$OUT"
+            cp -R "$FOUND" "$OUT/"
+            python3 pipeline/scripts/make-registry.py Frameworks/Versions 2>&1 | tail -5
+            cat Frameworks/Versions/versions.json
+          fi
+          curl -fsSL --retry 3 -o /tmp/xg.zip "https://github.com/yonaskolb/XcodeGen/releases/latest/download/xcodegen.zip"
+          rm -rf /tmp/xg && unzip -q /tmp/xg.zip -d /tmp/xg
+          XG=$(find /tmp/xg -maxdepth 4 -type f -name xcodegen | head -1)
+          chmod +x "$XG"
+          export PATH="$(dirname "$XG"):$PATH"
+          xcodegen generate
+          xcodebuild -project MobiLite.xcodeproj -scheme MobiLite -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" > /tmp/xcode2.log 2>&1
+          tail -20 /tmp/xcode2.log
+          APP="build/Build/Products/Release-iphoneos/MobiLite.app"
+          if [ -f "$APP/MobiLite" ]; then
+            rm -rf Payload && mkdir -p Payload && cp -R "$APP" Payload/
+            zip -qry "MobiLite-$MC_VER-$AOT_SCOPE-unsigned.ipa" Payload
+          fi
+          ls -l *.ipa 2>/dev/null
+
+      - name: 上传到 filebin
+        if: always()
+        run: |
+          set +e
+          cd "${GITHUB_WORKSPACE:-$PWD}"
+          {
+            echo "ipa: $(ls -1 *.ipa 2>/dev/null)"
+            echo "== versions.json"
+            cat Frameworks/Versions/versions.json 2>/dev/null
+            echo "== app Versions tree"
+            ls -laR Payload/MobiLite.app/Frameworks/Versions 2>/dev/null | head -60
+          } > manifest.txt 2>&1
+          cat manifest.txt
+          for f in $(ls -1 *.ipa 2>/dev/null) manifest.txt _ci_out/fallback.log pipeline/build/1.21.4/gradle-aot.log /tmp/xcode2.log; do
+            [ -f "$f" ] || continue
+            b=$(basename "$f")
+            curl -sS --max-time 900 -X POST -H "filename: $b" --data-binary @"$f" "https://filebin.net/$BIN/$b" > /dev/null || true
+            echo "sent: $b"
+          done
