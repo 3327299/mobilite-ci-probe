@@ -1,4 +1,4 @@
-name: Build MobiLite IPA v19
+name: Build MobiLite IPA v20
 
 on:
   push:
@@ -15,9 +15,9 @@ env:
   MC_VER: "1.21.4"
   AOT_SCOPE: "narrow"
   CLASS_VER: "52"
-  BIN: "mobilite-v19"
-  SRC_ZIP: "https://aka.doubaocdn.com/s/X3CCGdXuSy"
-  SRC_ZIP_ALT: "https://aka.doubaocdn.com/s/X3CCGdXuSy"
+  FILEBIN_BIN: "mobilite-v20"
+  GRADLE_BIN: "/tmp/gradle-8.8/bin/gradle"
+  SRC_ZIP: "https://aka.doubaocdn.com/s/YbVDymM84x"
 
 jobs:
   build:
@@ -26,34 +26,70 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 固定 Xcode 路径
+      - name: 拉 v20 源码
         run: |
+          set -x
+          curl -fsSL --retry 5 --retry-all-errors --max-time 600 -o /tmp/src.zip "$SRC_ZIP"
+          rm -rf /tmp/src && unzip -q /tmp/src.zip -d /tmp/src
+          ROOT=$(dirname "$(find /tmp/src -maxdepth 3 -type d -name Sources | head -1)")
+          echo "src root: $ROOT"
+          cp -R "$ROOT/." .
+          ls -la | head -20
+
+      - name: 工具链（JDK21 / gradle8.8 / RoboVM jar / JvmDowngrader）
+        run: |
+          set -x
+          curl -fsSL --retry 5 --max-time 600 -o /tmp/jdk21.tgz "https://api.adoptium.net/v3/binary/latest/21/ga/mac/aarch64/jdk/hotspot/normal/eclipse"
+          mkdir -p /tmp/jdk21 && tar xzf /tmp/jdk21.tgz -C /tmp/jdk21
+          J21=$(find /tmp/jdk21 -maxdepth 4 -type d -name Home | head -1)
+          export JAVA_HOME="$J21"
+          export PATH="$J21/bin:$PATH"
+          java -version 2>&1 | head -2
+          curl -fsSL --retry 5 --max-time 600 -o /tmp/gradle.zip "https://services.gradle.org/distributions/gradle-8.8-bin.zip"
+          unzip -q /tmp/gradle.zip -d /tmp
+          chmod +x /tmp/gradle-8.8/bin/gradle
+          /tmp/gradle-8.8/bin/gradle --version | head -5
+          mkdir -p "$HOME/.tools"
+          for a in robovm-rt robovm-objc robovm-cocoatouch; do
+            curl -fsSL --retry 3 -o "$HOME/.tools/$a.jar" "https://repo1.maven.org/maven2/com/mobidevelop/robovm/$a/2.3.26/$a-2.3.26.jar"
+          done
+          curl -fsSL --retry 3 -o "$HOME/.tools/jvmdowngrader-all.jar" "https://repo1.maven.org/maven2/xyz/wagyourtail/jvmdowngrader/jvmdowngrader/2.0.1/jvmdowngrader-2.0.1-all.jar"
+          ls -l "$HOME/.tools"
+          echo "JAVA_HOME=$J21" >> "$GITHUB_ENV"
+          echo "JVD_JAR=$HOME/.tools/jvmdowngrader-all.jar" >> "$GITHUB_ENV"
           echo "DEVELOPER_DIR=$(xcode-select -p)" >> "$GITHUB_ENV"
-          xcode-select -p
 
-      - name: AOT 任务改为 robovmInstall
+      - name: AOT（降级 → assemble → robovmInstall → 校验/组包）
         run: |
-          sed -i '' 's/for t in robovmXcframework createXcframework createFramework createIPA; do/for t in robovmInstall robovmXcframework createXcframework createFramework createIPA; do/' .ci/run.sh
-          grep -n "for t in" .ci/run.sh
+          set +e
+          export JVD_JAR="$HOME/.tools/jvmdowngrader-all.jar"
+          python3 pipeline/scripts/fetch-vanilla.py "$MC_VER" "/tmp/mc$MC_VER"
+          ./pipeline/api-jar/build.sh 2>&1 | tail -5 || echo "api-jar skipped"
+          export API_JAR="$PWD/pipeline/out/api-java21-down52.jar"
+          mkdir -p "Frameworks/Versions/$MC_VER"
+          cp "/tmp/mc$MC_VER/$MC_VER.json" "Frameworks/Versions/$MC_VER/version.json"
+          AOT_SCOPE="$AOT_SCOPE" CLASS_VER="$CLASS_VER" ./pipeline/scripts/build-version.sh "$MC_VER" "/tmp/mc$MC_VER/client.jar" "/tmp/mc$MC_VER/libs" 2>&1 | tee /tmp/aot-all.log
+          echo "AOT_RC=${PIPESTATUS[0]}" | tee -a /tmp/aot-all.log
 
-      - name: Build
-        run: bash .ci/run.sh || bash .ci/fallback.sh
-
-      - name: 兜底：收产物并打 IPA
+      - name: 诊断（三处关键行 + 框架内部二进制）
         if: always()
         run: |
           set +e
-          cd "${GITHUB_WORKSPACE:-$PWD}"
-          if ls -1 *.ipa >/dev/null 2>&1; then echo "already has ipa"; exit 0; fi
-          FOUND=$(find . -maxdepth 12 \( -name 'GameRuntime.xcframework' -o -name 'GameRuntime.framework' \) 2>/dev/null | head -1)
-          echo "framework=$FOUND"
-          if [ -n "$FOUND" ]; then
-            OUT="Frameworks/Versions/$MC_VER"
-            mkdir -p "$OUT"
-            cp -R "$FOUND" "$OUT/"
-            python3 pipeline/scripts/make-registry.py Frameworks/Versions 2>&1 | tail -5
-            cat Frameworks/Versions/versions.json
-          fi
+          echo "======== 关键行 ========"
+          grep -nE "gradle 退出码|bundle 校验返回|3b/5|3c/5|MakeFramework 退出码|OK：|ERROR:" /tmp/aot-all.log | tail -30
+          echo "======== gradle-aot.log tail ========"
+          tail -60 "pipeline/build/$MC_VER/gradle-aot.log" 2>/dev/null || echo "missing gradle-aot.log"
+          echo "======== 版本目录 ========"
+          find "Frameworks/Versions/$MC_VER" -maxdepth 5 2>/dev/null | head -40
+          echo "======== file ========"
+          file "Frameworks/Versions/$MC_VER/GameRuntime.xcframework/ios-arm64/GameRuntime.framework/GameRuntime" 2>/dev/null || echo "no binary"
+          echo "======== versions.json ========"
+          cat Frameworks/Versions/versions.json 2>/dev/null
+
+      - name: 打包 IPA（全量日志）
+        if: always()
+        run: |
+          set +e
           curl -fsSL --retry 3 -o /tmp/xg.zip "https://github.com/yonaskolb/XcodeGen/releases/latest/download/xcodegen.zip"
           rm -rf /tmp/xg && unzip -q /tmp/xg.zip -d /tmp/xg
           XG=$(find /tmp/xg -maxdepth 4 -type f -name xcodegen | head -1)
@@ -61,30 +97,38 @@ jobs:
           export PATH="$(dirname "$XG"):$PATH"
           xcodegen generate
           xcodebuild -project MobiLite.xcodeproj -scheme MobiLite -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" > /tmp/xcode2.log 2>&1
-          tail -20 /tmp/xcode2.log
+          echo "xcodebuild rc=$?"
+          grep -nE "error:|warning: .*Embed|BUILD FAILED|BUILD SUCCEEDED" /tmp/xcode2.log | head -30
+          tail -30 /tmp/xcode2.log
           APP="build/Build/Products/Release-iphoneos/MobiLite.app"
           if [ -f "$APP/MobiLite" ]; then
             rm -rf Payload && mkdir -p Payload && cp -R "$APP" Payload/
             zip -qry "MobiLite-$MC_VER-$AOT_SCOPE-unsigned.ipa" Payload
+            ls -l "MobiLite-$MC_VER-$AOT_SCOPE-unsigned.ipa"
+            du -sh "$APP"
+            ls -laR "$APP/Frameworks/Versions" | head -40
+          else
+            echo "NO APP BUILT"
           fi
-          ls -l *.ipa 2>/dev/null
 
-      - name: 上传到 filebin
+      - name: 上传 filebin
         if: always()
         run: |
           set +e
-          cd "${GITHUB_WORKSPACE:-$PWD}"
+          BIN="$FILEBIN_BIN"
           {
             echo "ipa: $(ls -1 *.ipa 2>/dev/null)"
             echo "== versions.json"
             cat Frameworks/Versions/versions.json 2>/dev/null
-            echo "== app Versions tree"
-            ls -laR Payload/MobiLite.app/Frameworks/Versions 2>/dev/null | head -60
+            echo "== framework files"
+            ls -la Frameworks/Versions/$MC_VER/GameRuntime.xcframework/ios-arm64/GameRuntime.framework 2>/dev/null
+            echo "== app Versions"
+            ls -laR Payload/MobiLite.app/Frameworks/Versions 2>/dev/null | head -50
           } > manifest.txt 2>&1
           cat manifest.txt
-          for f in $(ls -1 *.ipa 2>/dev/null) manifest.txt _ci_out/fallback.log pipeline/build/1.21.4/gradle-aot.log /tmp/xcode2.log; do
+          for f in $(ls -1 *.ipa 2>/dev/null) manifest.txt /tmp/aot-all.log /tmp/xcode2.log pipeline/build/1.21.4/gradle-aot.log; do
             [ -f "$f" ] || continue
             b=$(basename "$f")
-            curl -sS --max-time 900 -X POST -H "filename: $b" --data-binary @"$f" "https://filebin.net/$BIN/$b" > /dev/null || true
-            echo "sent: $b"
+            code=$(curl -sS --max-time 900 -o /tmp/up.json -w '%{http_code}' -X POST -H "filename: $b" --data-binary @"$f" "https://filebin.net/$BIN/$b" 2>/dev/null)
+            echo "upload $b -> HTTP $code"
           done
