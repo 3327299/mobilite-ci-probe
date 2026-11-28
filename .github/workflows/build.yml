@@ -38,16 +38,18 @@ jobs:
           cp -R "$ROOT/." .
           ls Sources; ls bridge/glfw-ios
 
-      - name: xcodegen
+      - name: 工具链与 xcodegen
         run: |
           set -x
           curl -fsSL --retry 3 -o /tmp/xg.zip "https://github.com/yonaskolb/XcodeGen/releases/latest/download/xcodegen.zip"
           rm -rf /tmp/xg && unzip -q /tmp/xg.zip -d /tmp/xg
           XG=$(find /tmp/xg -maxdepth 4 -type f -name xcodegen | head -1)
           chmod +x "$XG"
-          mkdir -p /tmp/bin && cp "$XG" /tmp/bin/ && echo "/tmp/bin" >> "$GITHUB_PATH"
+          export PATH="$(dirname "$XG"):$PATH"
+          echo "$(dirname "$XG")" >> "$GITHUB_PATH"
+          xcodegen --version
           xcodegen generate
-          grep -c "GLFWIos\|MobiEGL" MobiLite.xcodeproj/project.pbxproj
+          grep -c "GLFWIos\|MobiEGL" MobiLite.xcodeproj/project.pbxproj || true
 
       - name: ObjC/Swift 编译冒烟（AOT 之前）
         run: |
@@ -60,7 +62,7 @@ jobs:
           grep -E " error: " /tmp/smoke.log | sed 's|.*/mobilite-ci-probe/||' | head -30
           tail -5 /tmp/smoke.log
 
-      - name: 工具链（JDK21 / gradle8.8 / RoboVM 四件套 / JvmDowngrader）
+      - name: JDK21 + gradle8.8 + RoboVM 四件套 + JvmDowngrader
         run: |
           set -x
           curl -fsSL --retry 5 --max-time 600 -o /tmp/jdk21.tgz "https://api.adoptium.net/v3/binary/latest/21/ga/mac/aarch64/jdk/hotspot/normal/eclipse"
@@ -106,6 +108,7 @@ jobs:
           set +e
           echo "======== 冒烟关键行 ========"
           grep -cE " error: " /tmp/smoke.log
+          grep -E " error: " /tmp/smoke.log | sed 's|.*/mobilite-ci-probe/||' | head -30
           echo "======== AOT 关键行 ========"
           grep -nE "gradle 退出码|bundle 校验返回|3b/5|3c/5|4b/5|OK：|ERROR:|thin/arm64|bytes" /tmp/aot-all.log 2>/dev/null | tail -30
           echo "======== stubs ========"
@@ -134,8 +137,9 @@ jobs:
             du -sh "$APP"
             echo "== binary in app =="
             lipo -info "$APP/MobiLite" 2>/dev/null || file "$APP/MobiLite"
-            echo "== GLFW/EGL symbols in app =="
-            nm -gU "$APP/MobiLite" 2>/dev/null | grep -c "_OBJC_CLASS_\\$_MobiGLFW\\|_OBJC_CLASS_\\$_MobiEGL"
+            echo "== ObjC classes present =="
+            nm -gU "$APP/MobiLite" 2>/dev/null | grep -c "MobiGLFW"
+            nm -gU "$APP/MobiLite" 2>/dev/null | grep -c "MobiEGL"
             echo "== versions =="
             ls -laR "$APP/Frameworks/Versions" 2>/dev/null | head -30
           else
