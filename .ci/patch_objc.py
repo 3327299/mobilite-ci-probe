@@ -32,3 +32,14 @@ if '<dlfcn.h>' not in b:
     n += 1
 
 print('objc patches applied:', n)
+
+# v29.1：版本号改为 29.1（影响 Info.plist 的 CFBundleShortVersionString / IPA 命名）
+try:
+    p = 'project.yml'
+    s = open(p, encoding='utf-8').read()
+    s2 = s.replace('MARKETING_VERSION: "1.0.0"', 'MARKETING_VERSION: "29.1"')
+    if s2 != s:
+        open(p, 'w', encoding='utf-8').write(s2)
+        print('version -> 29.1')
+except FileNotFoundError:
+    pass
