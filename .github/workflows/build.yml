@@ -17,6 +17,7 @@ env:
   CLASS_VER: "52"
   ROBOVM_VERSION: "3.0.1"
   FILEBIN_BIN: "mobilite-v24"
+  GRADLE_BIN: "/tmp/gradle-8.8/bin/gradle"
   SRC_ZIP: "https://aka.doubaocdn.com/s/0G62te691l"
 
 jobs:
@@ -35,7 +36,12 @@ jobs:
           echo "src root: $ROOT"
           cp -R "$ROOT/." .
           ls Sources | head
-          ls docs | head
+
+      - name: 修 shell 全角变量名
+        run: |
+          set -x
+          python3 .ci/patch_cjk.py
+          grep -n 'OUT_JAR' pipeline/scripts/make-stub-jar.sh | head -3
 
       - name: 工具链（JDK21 / gradle8.8 / RoboVM 3.0.1 四件套 / JvmDowngrader）
         run: |
@@ -55,7 +61,7 @@ jobs:
           for a in robovm-rt robovm-objc robovm-cocoatouch; do
             curl -fsSL --retry 3 -o "$HOME/.tools/$a.jar" "https://repo1.maven.org/maven2/com/mobidevelop/robovm/$a/$V/$a-$V.jar" || echo "MISS $a"
           done
-          curl -fsSL --retry 3 -o "$HOME/.tools/robovm-bro-bridge.jar" "https://repo1.maven.org/maven2/com/mobidevelop/robovm/robovm-bro-bridge/$V/robovm-bro-bridge-$V.jar" || echo "MISS robovm-bro-bridge（3.x 必需，若真缺 javac 会报 NativeObject）"
+          curl -fsSL --retry 3 -o "$HOME/.tools/robovm-bro-bridge.jar" "https://repo1.maven.org/maven2/com/mobidevelop/robovm/robovm-bro-bridge/$V/robovm-bro-bridge-$V.jar" || echo "MISS robovm-bro-bridge"
           curl -fsSL --retry 3 -o "$HOME/.tools/jvmdowngrader-all.jar" "https://repo1.maven.org/maven2/xyz/wagyourtail/jvmdowngrader/jvmdowngrader/2.0.1/jvmdowngrader-2.0.1-all.jar"
           ls -l "$HOME/.tools"
           echo "JAVA_HOME=$J21" >> "$GITHUB_ENV"
@@ -63,6 +69,7 @@ jobs:
           echo "DEVELOPER_DIR=$(xcode-select -p)" >> "$GITHUB_ENV"
           echo "JAVAC_BIN=$J21/bin/javac" >> "$GITHUB_ENV"
           echo "JAVA_BIN=$J21/bin/java" >> "$GITHUB_ENV"
+          echo "GRADLE_BIN=/tmp/gradle-8.8/bin/gradle" >> "$GITHUB_ENV"
 
       - name: AOT（降级 → 桩 → assemble → robovmInstall → 校验/组包）
         run: |
@@ -76,15 +83,15 @@ jobs:
           AOT_SCOPE="$AOT_SCOPE" CLASS_VER="$CLASS_VER" ROBOVM_VERSION="$ROBOVM_VERSION" ./pipeline/scripts/build-version.sh "$MC_VER" "/tmp/mc$MC_VER/client.jar" "/tmp/mc$MC_VER/libs" 2>&1 | tee /tmp/aot-all.log
           echo "AOT_RC=${PIPESTATUS[0]}" | tee -a /tmp/aot-all.log
 
-      - name: 诊断（三处关键行 + 桩名单 + 框架二进制）
+      - name: 诊断（关键行 + 桩名单 + 框架二进制）
         if: always()
         run: |
           set +e
           echo "======== 关键行 ========"
-          grep -nE "gradle 退出码|bundle 校验返回|3b/5|3c/5|MakeFramework 退出码|OK：|ERROR:|stubs 退出码|缺失" /tmp/aot-all.log | tail -40
-          echo "======== stubs 名单 ========"
-          grep -nE "缺|热路径|stub" pipeline/build/$MC_VER/stubs.log 2>/dev/null | tail -25
-          echo "======== gradle-aot.log tail ========"
+          grep -nE "gradle 退出码|bundle 校验返回|3b/5|3c/5|MakeFramework 退出码|OK：|ERROR:|stubs 退出码|证物" /tmp/aot-all.log | tail -40
+          echo "======== stubs ========"
+          grep -nE "缺|热路径|stub classes" pipeline/build/$MC_VER/stubs.log 2>/dev/null | tail -20
+          echo "======== gradle-aot tail ========"
           tail -40 "pipeline/build/$MC_VER/gradle-aot.log" 2>/dev/null || echo "missing gradle-aot.log"
           echo "======== 版本目录 ========"
           find "Frameworks/Versions/$MC_VER" -maxdepth 5 2>/dev/null | head -30
