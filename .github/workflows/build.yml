@@ -13,7 +13,7 @@ permissions:
 
 env:
   MC_VER: "1.21.4"
-  AOT: "1"            # 第二轮：真编 full
+  AOT: "1"
   AOT_SCOPE: "full"
   CLASS_VER: "52"
   ROBOVM_VERSION: "3.0.1"
@@ -28,7 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 拉 v29 源码 + ObjC 补丁
+      - name: 拉 v29 源码 + 补丁
         run: |
           set -x
           curl -fsSL --retry 5 --retry-all-errors --max-time 600 -o /tmp/src.zip "$SRC_ZIP"
@@ -37,8 +37,9 @@ jobs:
           echo "src root: $ROOT"
           cp -R "$ROOT/." .
           python3 .ci/patch_objc.py
+          python3 .ci/patch_strip.py
+          grep -n "2a2/5" pipeline/scripts/build-version.sh | head -3
           grep -n "static CAEAGLLayer" bridge/glfw-ios/GLFWIos.m
-          grep -c "pushEventType" bridge/glfw-ios/GLFWIos.m
 
       - name: 工具链与 xcodegen
         run: |
@@ -62,7 +63,7 @@ jobs:
           grep -cE " error: " /tmp/smoke.log
           grep -E " error: " /tmp/smoke.log | sed 's|.*/mobilite-ci-probe/||' | head -30
 
-      - name: JDK21 + gradle8.8 + RoboVM 四件套 + JvmDowngrader
+      - name: JDK21 + gradle8.8 + RoboVM 四件套 + JvmDowngrader + ASM
         run: |
           set -x
           curl -fsSL --retry 5 --max-time 600 -o /tmp/jdk21.tgz "https://api.adoptium.net/v3/binary/latest/21/ga/mac/aarch64/jdk/hotspot/normal/eclipse"
@@ -79,6 +80,10 @@ jobs:
           done
           curl -fsSL --retry 3 -o "$HOME/.tools/robovm-bro-bridge.jar" "https://repo1.maven.org/maven2/com/mobidevelop/robovm/robovm-bro-bridge/$V/robovm-bro-bridge-$V.jar" || echo "MISS bro-bridge"
           curl -fsSL --retry 3 -o "$HOME/.tools/jvmdowngrader-all.jar" "https://repo1.maven.org/maven2/xyz/wagyourtail/jvmdowngrader/jvmdowngrader/2.0.1/jvmdowngrader-2.0.1-all.jar"
+          curl -fsSL --retry 3 -o "$HOME/.tools/asm.jar" "https://repo1.maven.org/maven2/org/ow2/asm/asm/9.7/asm-9.7.jar"
+          mkdir -p "$HOME/.tools/stripdebug"
+          "$J21/bin/javac" -cp "$HOME/.tools/asm.jar" -d "$HOME/.tools/stripdebug" .ci/StripDebug.java
+          echo "StripDebug classes: $(ls "$HOME/.tools/stripdebug" | tr '\n' ' ')"
           ls -l "$HOME/.tools"
           {
             echo "JAVA_HOME=$J21"
@@ -88,7 +93,7 @@ jobs:
             echo "DEVELOPER_DIR=$(xcode-select -p)"
           } >> "$GITHUB_ENV"
 
-      - name: AOT（降级 → 桩 → robovmInstall → 校验/组包）
+      - name: AOT（降级 → strip → 桩 → robovmInstall → 校验/组包）
         if: env.AOT == '1'
         run: |
           set +e
@@ -109,11 +114,11 @@ jobs:
           echo "======== 冒烟 ========"
           grep -cE " error: " /tmp/smoke.log
           echo "======== AOT 关键行 ========"
-          grep -nE "gradle 退出码|bundle 校验返回|3b/5|3c/5|4b/5|OK：|ERROR:|thin/arm64|bytes" /tmp/aot-all.log 2>/dev/null | tail -30
+          grep -nE "gradle 退出码|bundle 校验返回|3b/5|3c/5|4b/5|2a2/5|OK：|strip|ERROR:|thin/arm64" /tmp/aot-all.log 2>/dev/null | tail -30
           echo "======== stubs ========"
-          grep -nE "缺|热路径|stub classes" pipeline/build/$MC_VER/stubs.log 2>/dev/null | tail -20
-          echo "======== gradle-aot tail ========"
-          tail -30 "pipeline/build/$MC_VER/gradle-aot.log" 2>/dev/null
+          grep -nE "缺|热路径|stub classes" pipeline/build/$MC_VER/stubs.log 2>/dev/null | tail -12
+          echo "======== gradle-aot 错误 ========"
+          grep -nE "What went wrong|Caused by|FAILED|error:" pipeline/build/$MC_VER/gradle-aot.log 2>/dev/null | head -20
           echo "======== 版本目录 ========"
           find "Frameworks/Versions/$MC_VER" -maxdepth 5 2>/dev/null | head -25
           echo "======== versions.json ========"
@@ -138,7 +143,7 @@ jobs:
             du -sh "$APP"
             echo "== binary in app =="
             lipo -info "$APP/MobiLite" 2>/dev/null || file "$APP/MobiLite"
-            echo "== ObjC classes present =="
+            echo "== ObjC classes present (MobiGLFW / MobiEGL) =="
             nm -gU "$APP/MobiLite" 2>/dev/null | grep -c "MobiGLFW"
             nm -gU "$APP/MobiLite" 2>/dev/null | grep -c "MobiEGL"
             echo "== runtime binary =="
