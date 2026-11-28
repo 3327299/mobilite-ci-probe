@@ -34,11 +34,14 @@ jobs:
           cp -R "$ROOT/." .
           ls Sources | head
 
-      - name: 打补丁（Swift 语法 + CJK 变量名 + iOS Security）
+      - name: 打补丁（Swift 语法 + CJK 变量名 + iOS Security + bundle 脚本）
         run: |
           set -x
           python3 .ci/patch17.py || true
           python3 .ci/patch_binary.py || true
+          grep -n 'token 有效' Sources/Support/Diagnostics.swift | head -3
+          grep -n 'renderDistance' Sources/Versions/VersionStorage.swift | head -3
+          grep -n 'missingClientID' Sources/Auth/MicrosoftAuth.swift | head -3
 
       - name: 工具链（JDK21 / gradle8.8 / RoboVM jar / JvmDowngrader）
         run: |
@@ -68,29 +71,27 @@ jobs:
           set +e
           export JVD_JAR="$HOME/.tools/jvmdowngrader-all.jar"
           python3 pipeline/scripts/fetch-vanilla.py "$MC_VER" "/tmp/mc$MC_VER"
-          ./pipeline/api-jar/build.sh 2>&1 | tail -5 || echo "api-jar skipped"
+          ./pipeline/api-jar/build.sh 2>&1 | tail -5
           export API_JAR="$PWD/pipeline/out/api-java21-down52.jar"
           mkdir -p "Frameworks/Versions/$MC_VER"
           cp "/tmp/mc$MC_VER/$MC_VER.json" "Frameworks/Versions/$MC_VER/version.json"
           AOT_SCOPE="$AOT_SCOPE" CLASS_VER="$CLASS_VER" ./pipeline/scripts/build-version.sh "$MC_VER" "/tmp/mc$MC_VER/client.jar" "/tmp/mc$MC_VER/libs" 2>&1 | tee /tmp/aot-all.log
           echo "AOT_RC=${PIPESTATUS[0]}" | tee -a /tmp/aot-all.log
 
-      - name: 诊断（三处关键行 + 框架内部二进制）
+      - name: 诊断（关键行 + 框架二进制 + 版本表）
         if: always()
         run: |
           set +e
           echo "======== 关键行 ========"
           grep -nE "gradle 退出码|bundle 校验返回|3b/5|3c/5|MakeFramework 退出码|OK：|ERROR:" /tmp/aot-all.log | tail -30
           echo "======== gradle-aot.log tail ========"
-          tail -60 "pipeline/build/$MC_VER/gradle-aot.log" 2>/dev/null || echo "missing gradle-aot.log"
+          tail -40 "pipeline/build/$MC_VER/gradle-aot.log" 2>/dev/null || echo "missing gradle-aot.log"
           echo "======== 版本目录 ========"
-          find "Frameworks/Versions/$MC_VER" -maxdepth 5 2>/dev/null | head -40
+          find "Frameworks/Versions/$MC_VER" -maxdepth 5 2>/dev/null | head -30
           echo "======== file ========"
           file "Frameworks/Versions/$MC_VER/GameRuntime.xcframework/ios-arm64/GameRuntime.framework/GameRuntime" 2>/dev/null || echo "no binary"
           echo "======== versions.json ========"
           cat Frameworks/Versions/versions.json 2>/dev/null
-          echo "======== patch 日志 ========"
-          python3 .ci/patch17.py 2>&1 | tail -10 || true
 
       - name: 打包 IPA（全量日志）
         if: always()
@@ -127,7 +128,7 @@ jobs:
             echo "== versions.json"
             cat Frameworks/Versions/versions.json 2>/dev/null
             echo "== framework files"
-            ls -la Frameworks/Versions/$MC_VER/GameRuntime.xcframework/ios-arm64/GameRuntime.framework 2>/dev/null
+            ls -la "Frameworks/Versions/$MC_VER/GameRuntime.xcframework/ios-arm64/GameRuntime.framework" 2>/dev/null
           } > manifest.txt 2>&1
           cat manifest.txt
           for f in $(ls -1 *.ipa 2>/dev/null) manifest.txt /tmp/aot-all.log /tmp/xcode2.log pipeline/build/1.21.4/gradle-aot.log; do
