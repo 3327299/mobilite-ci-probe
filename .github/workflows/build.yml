@@ -1,4 +1,4 @@
-name: Build MobiLite IPA v20
+name: Build MobiLite IPA v24
 
 on:
   push:
@@ -15,35 +15,29 @@ env:
   MC_VER: "1.21.4"
   AOT_SCOPE: "narrow"
   CLASS_VER: "52"
-  FILEBIN_BIN: "mobilite-v20"
-  SRC_ZIP: "https://aka.doubaocdn.com/s/YbVDymM84x"
+  ROBOVM_VERSION: "3.0.1"
+  FILEBIN_BIN: "mobilite-v24"
+  SRC_ZIP: "https://aka.doubaocdn.com/s/0G62te691l"
 
 jobs:
   build:
     runs-on: macos-15
-    timeout-minutes: 300
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
 
-      - name: 拉 v20 源码
+      - name: 拉 v24 源码
         run: |
           set -x
           curl -fsSL --retry 5 --retry-all-errors --max-time 600 -o /tmp/src.zip "$SRC_ZIP"
           rm -rf /tmp/src && unzip -q /tmp/src.zip -d /tmp/src
           ROOT=$(dirname "$(find /tmp/src -maxdepth 3 -type d -name Sources | head -1)")
+          echo "src root: $ROOT"
           cp -R "$ROOT/." .
           ls Sources | head
+          ls docs | head
 
-      - name: 打补丁（Swift 语法 + CJK 变量名 + iOS Security + bundle 脚本）
-        run: |
-          set -x
-          python3 .ci/patch17.py || true
-          python3 .ci/patch_binary.py || true
-          grep -n 'token 有效' Sources/Support/Diagnostics.swift | head -3
-          grep -n 'renderDistance' Sources/Versions/VersionStorage.swift | head -3
-          grep -n 'missingClientID' Sources/Auth/MicrosoftAuth.swift | head -3
-
-      - name: 工具链（JDK21 / gradle8.8 / RoboVM jar / JvmDowngrader）
+      - name: 工具链（JDK21 / gradle8.8 / RoboVM 3.0.1 四件套 / JvmDowngrader）
         run: |
           set -x
           curl -fsSL --retry 5 --max-time 600 -o /tmp/jdk21.tgz "https://api.adoptium.net/v3/binary/latest/21/ga/mac/aarch64/jdk/hotspot/normal/eclipse"
@@ -57,16 +51,20 @@ jobs:
           chmod +x /tmp/gradle-8.8/bin/gradle
           /tmp/gradle-8.8/bin/gradle --version | head -5
           mkdir -p "$HOME/.tools"
+          V="$ROBOVM_VERSION"
           for a in robovm-rt robovm-objc robovm-cocoatouch; do
-            curl -fsSL --retry 3 -o "$HOME/.tools/$a.jar" "https://repo1.maven.org/maven2/com/mobidevelop/robovm/$a/2.3.26/$a-2.3.26.jar"
+            curl -fsSL --retry 3 -o "$HOME/.tools/$a.jar" "https://repo1.maven.org/maven2/com/mobidevelop/robovm/$a/$V/$a-$V.jar" || echo "MISS $a"
           done
+          curl -fsSL --retry 3 -o "$HOME/.tools/robovm-bro-bridge.jar" "https://repo1.maven.org/maven2/com/mobidevelop/robovm/robovm-bro-bridge/$V/robovm-bro-bridge-$V.jar" || echo "MISS robovm-bro-bridge（3.x 必需，若真缺 javac 会报 NativeObject）"
           curl -fsSL --retry 3 -o "$HOME/.tools/jvmdowngrader-all.jar" "https://repo1.maven.org/maven2/xyz/wagyourtail/jvmdowngrader/jvmdowngrader/2.0.1/jvmdowngrader-2.0.1-all.jar"
           ls -l "$HOME/.tools"
           echo "JAVA_HOME=$J21" >> "$GITHUB_ENV"
           echo "JVD_JAR=$HOME/.tools/jvmdowngrader-all.jar" >> "$GITHUB_ENV"
           echo "DEVELOPER_DIR=$(xcode-select -p)" >> "$GITHUB_ENV"
+          echo "JAVAC_BIN=$J21/bin/javac" >> "$GITHUB_ENV"
+          echo "JAVA_BIN=$J21/bin/java" >> "$GITHUB_ENV"
 
-      - name: AOT（降级 → assemble → robovmInstall → 校验/组包）
+      - name: AOT（降级 → 桩 → assemble → robovmInstall → 校验/组包）
         run: |
           set +e
           export JVD_JAR="$HOME/.tools/jvmdowngrader-all.jar"
@@ -75,15 +73,17 @@ jobs:
           export API_JAR="$PWD/pipeline/out/api-java21-down52.jar"
           mkdir -p "Frameworks/Versions/$MC_VER"
           cp "/tmp/mc$MC_VER/$MC_VER.json" "Frameworks/Versions/$MC_VER/version.json"
-          AOT_SCOPE="$AOT_SCOPE" CLASS_VER="$CLASS_VER" ./pipeline/scripts/build-version.sh "$MC_VER" "/tmp/mc$MC_VER/client.jar" "/tmp/mc$MC_VER/libs" 2>&1 | tee /tmp/aot-all.log
+          AOT_SCOPE="$AOT_SCOPE" CLASS_VER="$CLASS_VER" ROBOVM_VERSION="$ROBOVM_VERSION" ./pipeline/scripts/build-version.sh "$MC_VER" "/tmp/mc$MC_VER/client.jar" "/tmp/mc$MC_VER/libs" 2>&1 | tee /tmp/aot-all.log
           echo "AOT_RC=${PIPESTATUS[0]}" | tee -a /tmp/aot-all.log
 
-      - name: 诊断（关键行 + 框架二进制 + 版本表）
+      - name: 诊断（三处关键行 + 桩名单 + 框架二进制）
         if: always()
         run: |
           set +e
           echo "======== 关键行 ========"
-          grep -nE "gradle 退出码|bundle 校验返回|3b/5|3c/5|MakeFramework 退出码|OK：|ERROR:" /tmp/aot-all.log | tail -30
+          grep -nE "gradle 退出码|bundle 校验返回|3b/5|3c/5|MakeFramework 退出码|OK：|ERROR:|stubs 退出码|缺失" /tmp/aot-all.log | tail -40
+          echo "======== stubs 名单 ========"
+          grep -nE "缺|热路径|stub" pipeline/build/$MC_VER/stubs.log 2>/dev/null | tail -25
           echo "======== gradle-aot.log tail ========"
           tail -40 "pipeline/build/$MC_VER/gradle-aot.log" 2>/dev/null || echo "missing gradle-aot.log"
           echo "======== 版本目录 ========"
@@ -131,7 +131,7 @@ jobs:
             ls -la "Frameworks/Versions/$MC_VER/GameRuntime.xcframework/ios-arm64/GameRuntime.framework" 2>/dev/null
           } > manifest.txt 2>&1
           cat manifest.txt
-          for f in $(ls -1 *.ipa 2>/dev/null) manifest.txt /tmp/aot-all.log /tmp/xcode2.log pipeline/build/1.21.4/gradle-aot.log; do
+          for f in $(ls -1 *.ipa 2>/dev/null) manifest.txt /tmp/aot-all.log /tmp/xcode2.log pipeline/build/1.21.4/gradle-aot.log pipeline/build/1.21.4/stubs.log; do
             [ -f "$f" ] || continue
             b=$(basename "$f")
             code=$(curl -sS --max-time 900 -o /tmp/up.json -w '%{http_code}' -X POST -H "filename: $b" --data-binary @"$f" "https://filebin.net/$BIN/$b" 2>/dev/null)
