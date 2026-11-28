@@ -31,12 +31,38 @@ fi
 
 if '2a2/5 剔掉 LocalVariableTable' in s:
     print('strip patch already applied')
-    sys.exit(0)
+else:
+    if ANCHOR not in s:
+        print('ANCHOR NOT FOUND - abort')
+        sys.exit(1)
+    s = s.replace(ANCHOR, BLOCK + ANCHOR, 1)
+    open(P, 'w', encoding='utf-8').write(s)
+    print('strip patch inserted')
 
-if ANCHOR not in s:
-    print('ANCHOR NOT FOUND - abort')
-    sys.exit(1)
+# ---- 追加：3b 段前把 robovm-gradle-plugin jar 落到 $HOME/.tools ----
+# 现状：workflow 只把 rt/objc/cocoatouch/bro-bridge 放进 .tools，漏了插件本体，
+# 于是 3c 的 find($HOME/.gradle/caches $HOME/.tools) 找不到 → ERROR rc=3。
+PLUG = '''# ---- 3b/3c 前确保 plugin jar 在手（find 会搜 $HOME/.tools）----
+PVER="${ROBOVM_VERSION:-3.0.1}"
+PJAR="$HOME/.tools/robovm-gradle-plugin-$PVER.jar"
+if [ ! -f "$PJAR" ]; then
+  log "下载 robovm-gradle-plugin-$PVER.jar"
+  curl -fsSL --retry 3 -o "$PJAR" \\
+    "https://repo1.maven.org/maven2/com/mobidevelop/robovm/robovm-gradle-plugin/$PVER/robovm-gradle-plugin-$PVER.jar" \\
+    || log "WARN: plugin jar 下载失败"
+fi
+ls -l "$PJAR" 2>/dev/null || true
 
-s = s.replace(ANCHOR, BLOCK + ANCHOR, 1)
-open(P, 'w', encoding='utf-8').write(s)
-print('strip patch inserted')
+'''
+
+s2 = open(P, encoding='utf-8').read()
+if '确保 plugin jar 在手' in s2:
+    print('plugin patch already applied')
+else:
+    ANCH = '  if [ -n "$RAWBIN" ]; then'
+    if ANCH in s2:
+        s2 = s2.replace(ANCH, PLUG + ANCH, 1)
+        open(P, 'w', encoding='utf-8').write(s2)
+        print('plugin patch inserted')
+    else:
+        print('plugin anchor missing')
