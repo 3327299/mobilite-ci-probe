@@ -19,8 +19,7 @@ env:
   FILEBIN_BIN: "mobilite-v291"
   GRADLE_BIN: "/tmp/gradle-8.8/bin/gradle"
   SRC_ZIP: "https://aka.doubaocdn.com/s/C1Ts65Gv8l"
-  FIXED_BVS: "https://aka.doubaocdn.com/s/0oWxKiZvAG"
-  FIXED_STRIP: "https://aka.doubaocdn.com/s/WYifWU4sqd"
+  FIXED_BVS: "https://aka.doubaocdn.com/s/B17DB7sA8q"
 
 jobs:
   build:
@@ -36,37 +35,60 @@ jobs:
           echo "zip bytes: $(wc -c < /tmp/src.zip)"
           rm -rf /tmp/src && unzip -q /tmp/src.zip -d /tmp/src
           ROOT=$(dirname "$(find /tmp/src -maxdepth 3 -type d -name Sources | head -1)")
-          echo "src root: $ROOT"
           cp -R "$ROOT/." .
 
-          echo "---- ObjC 三处修复（sed，幂等）----"
+          echo "---- ObjC 修复 ----"
           sed -i '' 's/static id gLayer;/static CAEAGLLayer *gLayer;/' bridge/glfw-ios/GLFWIos.m
           sed -i '' '/^\+ \(void\)pushEventType:\(int32_t\)t a:\(int32_t\)a b:\(int32_t\)b x:\(double\)x y:\(double\)y;/d' bridge/glfw-ios/GLFWIos.m
           grep -q '<dlfcn.h>' bridge/glfw-ios/MobiEGL.m || sed -i '' 's|#include <string.h>|#include <string.h>\n#include <dlfcn.h>|' bridge/glfw-ios/MobiEGL.m
-          grep -n "static CAEAGLLayer" bridge/glfw-ios/GLFWIos.m
-          grep -c "pushEventType" bridge/glfw-ios/GLFWIos.m
-          grep -n "dlfcn" bridge/glfw-ios/MobiEGL.m | head -2
 
-          echo "---- 覆盖 build-version.sh（含 2a2/5 strip 与 plugin 下载）----"
-          if curl -fsSL --retry 5 --max-time 120 -o /tmp/bvs.sh "$FIXED_BVS"; then
-            wc -c /tmp/bvs.sh
-            cp /tmp/bvs.sh pipeline/scripts/build-version.sh
-            chmod +x pipeline/scripts/build-version.sh
-            echo "OK build-version.sh replaced"
-          else
-            echo "!! FIXED_BVS 下载失败，保留原脚本"
-          fi
-          echo "---- StripDebug.java ----"
-          curl -fsSL --retry 5 --max-time 120 -o .ci/StripDebug.java "$FIXED_STRIP" && wc -l .ci/StripDebug.java || echo "!! StripDebug 下载失败"
-
-          echo "---- 版本号 29.1 ----"
-          sed -i '' 's/MARKETING_VERSION: "1.0.0"/MARKETING_VERSION: "29.1"/' project.yml
-          grep -n "MARKETING_VERSION" project.yml
-
-          echo "---- 验证：2a2/5 与 plugin 段是否在脚本里 ----"
-          grep -c "2a2/5" pipeline/scripts/build-version.sh || echo "!! 2a2/5 缺失"
-          grep -c "确保 plugin jar" pipeline/scripts/build-version.sh || echo "!! plugin 段缺失"
+          echo "---- 覆盖 build-version.sh ----"
+          curl -fsSL --retry 5 --max-time 120 -o /tmp/bvs.sh "$FIXED_BVS" && cp /tmp/bvs.sh pipeline/scripts/build-version.sh && chmod +x pipeline/scripts/build-version.sh
+          grep -c "2a2/5" pipeline/scripts/build-version.sh
+          grep -n "rc=\${SRC}" pipeline/scripts/build-version.sh
           bash -n pipeline/scripts/build-version.sh && echo "bash -n OK"
+
+          echo "---- 内联 StripDebug.java（不依赖下载）----"
+          mkdir -p .ci
+          cat > .ci/StripDebug.java <<'JAVA'
+import java.io.*;
+import java.util.*;
+import java.util.zip.*;
+import org.objectweb.asm.*;
+
+public final class StripDebug {
+    public static void main(String[] args) throws Exception {
+        File in = new File(args[0]);
+        File out = new File(args[1]);
+        int classes = 0;
+        try (ZipFile zf = new ZipFile(in);
+             ZipOutputStream zo = new ZipOutputStream(new FileOutputStream(out))) {
+            Enumeration<? extends ZipEntry> en = zf.entries();
+            while (en.hasMoreElements()) {
+                ZipEntry e = en.nextElement();
+                byte[] b;
+                try (InputStream is = zf.getInputStream(e)) { b = is.readAllBytes(); }
+                if (e.getName().endsWith(".class")) {
+                    ClassReader cr = new ClassReader(b);
+                    ClassWriter cw = new ClassWriter(cr, 0);
+                    ClassVisitor cv = new ClassVisitor(Opcodes.ASM9, cw) {
+                        @Override public void visitLocalVariable(String n, String d, String s, Label a, Label z, int i) {}
+                    };
+                    cr.accept(cv, 0);
+                    b = cw.toByteArray();
+                    classes++;
+                }
+                zo.putNextEntry(new ZipEntry(e.getName()));
+                zo.write(b);
+                zo.closeEntry();
+            }
+        }
+        System.out.println("[strip] classes processed: " + classes);
+        System.out.println("[strip] out: " + out + " (" + out.length() / 1024 / 1024 + " MB)");
+    }
+}
+JAVA
+          wc -l .ci/StripDebug.java
 
       - name: xcodegen
         run: |
@@ -80,17 +102,7 @@ jobs:
           xcodegen generate
           ls -d MobiLite.xcodeproj
 
-      - name: ObjC/Swift 冒烟
-        run: |
-          set +e
-          xcodebuild -project MobiLite.xcodeproj -scheme MobiLite -configuration Debug -sdk iphoneos \
-            -derivedDataPath build-smoke CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-            > /tmp/smoke.log 2>&1
-          echo "smoke rc=$?"
-          grep -cE " error: " /tmp/smoke.log
-          grep -E " error: " /tmp/smoke.log | sed 's|.*/mobilite-ci-probe/||' | head -30
-
-      - name: JDK21 + gradle8.8 + RoboVM 五件套 + ASM
+      - name: JDK21 + gradle8.8 + RoboVM 五件套 + ASM + 编译 StripDebug
         run: |
           set -x
           curl -fsSL --retry 5 --max-time 600 -o /tmp/jdk21.tgz "https://api.adoptium.net/v3/binary/latest/21/ga/mac/aarch64/jdk/hotspot/normal/eclipse"
@@ -108,8 +120,9 @@ jobs:
           curl -fsSL --retry 3 -o "$HOME/.tools/jvmdowngrader-all.jar" "https://repo1.maven.org/maven2/xyz/wagyourtail/jvmdowngrader/jvmdowngrader/2.0.1/jvmdowngrader-2.0.1-all.jar"
           curl -fsSL --retry 3 -o "$HOME/.tools/asm.jar" "https://repo1.maven.org/maven2/org/ow2/asm/asm/9.7/asm-9.7.jar"
           mkdir -p "$HOME/.tools/stripdebug"
-          "$J21/bin/javac" -cp "$HOME/.tools/asm.jar" -d "$HOME/.tools/stripdebug" .ci/StripDebug.java && echo "StripDebug compiled" || echo "!! StripDebug COMPILE FAILED"
-          ls -l "$HOME/.tools" "$HOME/.tools/stripdebug"
+          "$J21/bin/javac" -cp "$HOME/.tools/asm.jar" -d "$HOME/.tools/stripdebug" .ci/StripDebug.java 2>&1 | tail -10
+          ls -l "$HOME/.tools/stripdebug"
+          "$J21/bin/java" -cp "$HOME/.tools/asm.jar:$HOME/.tools/stripdebug" StripDebug 2>&1 | head -3 || true
           {
             echo "JAVA_HOME=$J21"
             echo "JVD_JAR=$HOME/.tools/jvmdowngrader-all.jar"
@@ -117,6 +130,16 @@ jobs:
             echo "JAVA_BIN=$J21/bin/java"
             echo "DEVELOPER_DIR=$(xcode-select -p)"
           } >> "$GITHUB_ENV"
+
+      - name: ObjC/Swift 冒烟
+        run: |
+          set +e
+          xcodebuild -project MobiLite.xcodeproj -scheme MobiLite -configuration Debug -sdk iphoneos \
+            -derivedDataPath build-smoke CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            > /tmp/smoke.log 2>&1
+          echo "smoke rc=$?"
+          grep -cE " error: " /tmp/smoke.log
+          grep -E " error: " /tmp/smoke.log | sed 's|.*/mobilite-ci-probe/||' | head -20
 
       - name: MobiVM AOT（真编版本二进制）
         run: |
@@ -136,11 +159,10 @@ jobs:
         run: |
           set +e
           echo "======== AOT 标记行 ========"
-          grep -nE "==== [0-9]+[a-z]*/5|gradle 退出码|bundle 校验返回|3b/5|3c/5|strip ok|下载 robovm-gradle-plugin|OK：|ERROR|AOT_RC" /tmp/aot-all.log | tail -30
+          grep -nE "==== [0-9]+[a-z]*/5|gradle 退出码|bundle 校验返回|strip ok|classes processed|下载 robovm|OK：|ERROR|AOT_RC" /tmp/aot-all.log | tail -30
           echo "======== gradle 错误 ========"
           grep -nE "What went wrong|Caused by|FAILED|OutOfMemory|GC overhead" pipeline/build/$MC_VER/gradle-aot.log 2>/dev/null | head -15
           echo "======== 版本目录 ========"
-          ls -l "Frameworks/Versions/$MC_VER" 2>/dev/null
           find Frameworks/Versions -name GameRuntime 2>/dev/null | head -3
           file $(find Frameworks/Versions -name GameRuntime 2>/dev/null | head -1) 2>/dev/null
           python3 pipeline/scripts/verify_framework.py "Frameworks/Versions/$MC_VER" 2>/dev/null; echo "verify rc=$?"
