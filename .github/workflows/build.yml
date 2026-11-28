@@ -37,12 +37,15 @@ jobs:
           cp -R "$ROOT/." .
           ls Sources | head
 
-      - name: 修 shell 全角变量名 + gradle repositories
+      - name: 补丁（shell 全角变量 / gradle repositories+heap / Swift 语病）
         run: |
           set -x
           python3 .ci/patch_cjk.py
           python3 .ci/patch_gradle.py
+          python3 .ci/patch_swift.py
+          sed -n '155,162p' Sources/Runtime/Preflight.swift
           grep -n -A3 '^repositories' pipeline/version-build/build.gradle | head -8
+          cat pipeline/version-build/gradle.properties
 
       - name: 工具链（JDK21 / gradle8.8 / RoboVM 3.0.1 四件套 / JvmDowngrader）
         run: |
@@ -122,6 +125,8 @@ jobs:
             ls -l "MobiLite-$MC_VER-$AOT_SCOPE-unsigned.ipa"
             du -sh "$APP"
             ls -laR "$APP/Frameworks/Versions" | head -40
+            echo "== payload core files =="
+            find Payload/MobiLite.app -maxdepth 1 -type f -exec ls -l {} \; | head -30
           else
             echo "NO APP BUILT"
           fi
@@ -137,6 +142,8 @@ jobs:
             cat Frameworks/Versions/versions.json 2>/dev/null
             echo "== framework files"
             ls -la "Frameworks/Versions/$MC_VER/GameRuntime.xcframework/ios-arm64/GameRuntime.framework" 2>/dev/null
+            echo "== ipa listing"
+            unzip -l *.ipa 2>/dev/null | head -40
           } > manifest.txt 2>&1
           cat manifest.txt
           for f in $(ls -1 *.ipa 2>/dev/null) manifest.txt /tmp/aot-all.log /tmp/xcode2.log pipeline/build/1.21.4/gradle-aot.log pipeline/build/1.21.4/stubs.log; do
