@@ -13,7 +13,7 @@ permissions:
 
 env:
   MC_VER: "1.21.4"
-  AOT: "0"            # 第一轮：只冒烟 + 壳；通后改 1 跑 full
+  AOT: "1"            # 第二轮：真编 full
   AOT_SCOPE: "full"
   CLASS_VER: "52"
   ROBOVM_VERSION: "3.0.1"
@@ -38,7 +38,6 @@ jobs:
           cp -R "$ROOT/." .
           python3 .ci/patch_objc.py
           grep -n "static CAEAGLLayer" bridge/glfw-ios/GLFWIos.m
-          grep -n "dlfcn" bridge/glfw-ios/MobiEGL.m
           grep -c "pushEventType" bridge/glfw-ios/GLFWIos.m
 
       - name: 工具链与 xcodegen
@@ -52,7 +51,6 @@ jobs:
           echo "$(dirname "$XG")" >> "$GITHUB_PATH"
           xcodegen --version
           xcodegen generate
-          grep -c "GLFWIos\|MobiEGL" MobiLite.xcodeproj/project.pbxproj || true
 
       - name: ObjC/Swift 编译冒烟（AOT 之前）
         run: |
@@ -63,7 +61,6 @@ jobs:
           echo "smoke rc=$?"
           grep -cE " error: " /tmp/smoke.log
           grep -E " error: " /tmp/smoke.log | sed 's|.*/mobilite-ci-probe/||' | head -30
-          tail -5 /tmp/smoke.log
 
       - name: JDK21 + gradle8.8 + RoboVM 四件套 + JvmDowngrader
         run: |
@@ -109,13 +106,14 @@ jobs:
         if: always()
         run: |
           set +e
-          echo "======== 冒烟关键行 ========"
+          echo "======== 冒烟 ========"
           grep -cE " error: " /tmp/smoke.log
-          grep -E " error: " /tmp/smoke.log | sed 's|.*/mobilite-ci-probe/||' | head -30
           echo "======== AOT 关键行 ========"
           grep -nE "gradle 退出码|bundle 校验返回|3b/5|3c/5|4b/5|OK：|ERROR:|thin/arm64|bytes" /tmp/aot-all.log 2>/dev/null | tail -30
           echo "======== stubs ========"
           grep -nE "缺|热路径|stub classes" pipeline/build/$MC_VER/stubs.log 2>/dev/null | tail -20
+          echo "======== gradle-aot tail ========"
+          tail -30 "pipeline/build/$MC_VER/gradle-aot.log" 2>/dev/null
           echo "======== 版本目录 ========"
           find "Frameworks/Versions/$MC_VER" -maxdepth 5 2>/dev/null | head -25
           echo "======== versions.json ========"
@@ -143,8 +141,8 @@ jobs:
             echo "== ObjC classes present =="
             nm -gU "$APP/MobiLite" 2>/dev/null | grep -c "MobiGLFW"
             nm -gU "$APP/MobiLite" 2>/dev/null | grep -c "MobiEGL"
-            echo "== versions =="
-            ls -laR "$APP/Frameworks/Versions" 2>/dev/null | head -30
+            echo "== runtime binary =="
+            file "$APP/Frameworks/Versions/$MC_VER/GameRuntime.xcframework/ios-arm64/GameRuntime.framework/GameRuntime" 2>/dev/null
           else
             echo "NO APP BUILT"
           fi
